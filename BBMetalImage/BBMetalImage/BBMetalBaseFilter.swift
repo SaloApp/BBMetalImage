@@ -267,7 +267,7 @@ open class BBMetalBaseFilter: BBMetalImageSource, BBMetalImageConsumer {
         lock.signal()
     }
     
-    public func newTextureAvailable(_ texture: BBMetalTexture, from source: BBMetalImageSource) {
+    open func newTextureAvailable(_ texture: BBMetalTexture, from source: BBMetalImageSource) {
         lock.wait()
         
         // Check whether all input textures are ready
