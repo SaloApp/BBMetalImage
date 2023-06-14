@@ -32,7 +32,7 @@ Pod::Spec.new do |s|
 
   s.requires_arc = true
 
-  s.source_files  = 'BBMetalImage/BBMetalImage/**/*.{h,swift,metal}'
+  s.source_files  = 'BBMetalImage/BBMetalImage/**/*.{m,h,swift,metal}'
   s.exclude_files = 'BBMetalImage/BBMetalImage/MultipleVideoSource.swift'
 
   s.private_header_files = 'BBMetalImage/BBMetalImage/BBMetalShaderTypes.h'
