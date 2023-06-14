@@ -102,7 +102,7 @@ open class BBMetalView: MTKView {
     private let lock: DispatchSemaphore
     
     private lazy var renderPipeline: MTLRenderPipelineState = {
-        let library = try! device!.makeDefaultLibrary(bundle: Bundle.module)
+        let library = try! device!.makeDefaultLibrary(bundle: Bundle(for: BBMetalView.self))
         let descriptor = MTLRenderPipelineDescriptor()
         descriptor.label = "TexturePipeline"
         descriptor.vertexFunction = library.makeFunction(name: "vertexPassThrough")!

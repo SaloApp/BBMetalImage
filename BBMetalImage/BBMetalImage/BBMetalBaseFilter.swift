@@ -42,6 +42,7 @@ fileprivate struct _BBMetalFilterCompletionItem {
 
 /// A base filter processing texture. Subclass this class. Do not create an instance using the class directly.
 open class BBMetalBaseFilter: BBMetalImageSource, BBMetalImageConsumer {
+    public var pixelFormat: MTLPixelFormat = .rgba8Unorm
     /// Image consumers
     public var consumers: [BBMetalImageConsumer] {
         lock.wait()
@@ -143,7 +144,7 @@ open class BBMetalBaseFilter: BBMetalImageSource, BBMetalImageConsumer {
         self.useMPSKernel = useMPSKernel
         
         if !useMPSKernel,
-           let library = try? BBMetalDevice.sharedDevice.makeDefaultLibrary(bundle: useMainBundleKernel ? .main : Bundle.module),
+            let library = try? BBMetalDevice.sharedDevice.makeDefaultLibrary(bundle: useMainBundleKernel ? .main : Bundle(for: BBMetalBaseFilter.self)),
             let kernelFunction = library.makeFunction(name: kernelFunctionName) {
             computePipeline = try? BBMetalDevice.sharedDevice.makeComputePipelineState(function: kernelFunction)
         }
@@ -267,7 +268,7 @@ open class BBMetalBaseFilter: BBMetalImageSource, BBMetalImageConsumer {
         lock.signal()
     }
     
-    open func newTextureAvailable(_ texture: BBMetalTexture, from source: BBMetalImageSource) {
+    public func newTextureAvailable(_ texture: BBMetalTexture, from source: BBMetalImageSource) {
         lock.wait()
         
         // Check whether all input textures are ready
@@ -300,7 +301,7 @@ open class BBMetalBaseFilter: BBMetalImageSource, BBMetalImageConsumer {
             _outputTexture!.width != outputSize.width ||
             _outputTexture!.height != outputSize.height {
             let descriptor = MTLTextureDescriptor()
-            descriptor.pixelFormat = .rgba8Unorm
+            descriptor.pixelFormat = self.pixelFormat
             descriptor.width = outputSize.width
             descriptor.height = outputSize.height
             descriptor.usage = [.shaderRead, .shaderWrite]
@@ -377,6 +378,7 @@ open class BBMetalBaseFilter: BBMetalImageSource, BBMetalImageConsumer {
             encoder.setComputePipelineState(computePipeline)
             encoder.setTexture(_outputTexture, index: 0)
             for i in 0..<_sources.count { encoder.setTexture(_sources[i].texture, index: i + 1) }
+            updateParameters(for: encoder, texture: texture)
             updateParameters(forComputeCommandEncoder: encoder)
             encoder.dispatchThreadgroups(threadgroupCount!, threadsPerThreadgroup: threadgroupSize)
             encoder.endEncoding()
@@ -425,9 +427,16 @@ open class BBMetalBaseFilter: BBMetalImageSource, BBMetalImageConsumer {
     
     /// Updates parameters for the compute command encoder.
     /// Override the method to set bytes or other paramters for the compute command encoder.
+    /// 
+    /// - Parameters:
+    ///   - encoder: compute command encoder to use
+    ///   - texture: texture containing parameters
+    open func updateParameters(for encoder: MTLComputeCommandEncoder, texture: BBMetalTexture) {}
+    
+    /// Updates parameters for the compute command encoder.
+    /// Override the method to set bytes or other paramters for the compute command encoder.
     ///
     /// - Parameter encoder: compute command encoder to use
-    open func updateParameters(forComputeCommandEncoder encoder: MTLComputeCommandEncoder) {
-        fatalError("\(#function) must be overridden by subclass")
-    }
+    @available(iOS, deprecated, message: "Use updateParameters(for:texture:) instead.")
+    open func updateParameters(forComputeCommandEncoder encoder: MTLComputeCommandEncoder) {}
 }
