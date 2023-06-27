@@ -13,7 +13,7 @@ let package = Package(
         .target(
             name: "BBMetalImage",
             path: "BBMetalImage/BBMetalImage",
-            exclude: ["Shaders", "MultipleVideoSource.swift"],
+            exclude: ["MultipleVideoSource.swift"],
             resources: [.process("Shaders")]
         ),
     ]
