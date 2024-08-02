@@ -514,11 +514,17 @@ public class BBMetalCamera: NSObject {
     /// Before calling this method, set `canTakePhoto` property to true and `photoDelegate` property to nonnull.
     /// Get original frame texture in `camera(_:didOutput:)` method of `BBMetalCameraPhotoDelegate`.
     /// To get filtered texture, use `capturePhoto(completion:)` method, or create new filter to process the original frame texture.
-    public func takePhoto() {
+    public func takePhoto(
+        flashMode: AVCaptureDevice.FlashMode = .off
+    ) {
         lock.wait()
-        if let output = photoOutput,
-            _photoDelegate != nil {
-            let currentSettings = AVCapturePhotoSettings(format: [kCVPixelBufferPixelFormatTypeKey as String : kCVPixelFormatType_32BGRA])
+        if let output = photoOutput, _photoDelegate != nil {
+            let currentSettings = AVCapturePhotoSettings(format: [
+                kCVPixelBufferPixelFormatTypeKey as String : kCVPixelFormatType_32BGRA
+            ])
+            if camera.hasFlash {
+                currentSettings.flashMode = flashMode
+            }
             output.capturePhoto(with: currentSettings, delegate: self)
         }
         lock.signal()
