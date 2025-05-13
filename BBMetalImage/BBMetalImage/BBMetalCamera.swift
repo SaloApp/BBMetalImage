@@ -163,7 +163,7 @@ public class BBMetalCamera: NSObject {
     private let lock: DispatchSemaphore
     
     public var session: AVCaptureSession!
-    private var camera: AVCaptureDevice!
+    public var camera: AVCaptureDevice!
     public var videoInput: AVCaptureDeviceInput!
     private var videoOutput: AVCaptureVideoDataOutput!
     private var videoOutputQueue: DispatchQueue!
