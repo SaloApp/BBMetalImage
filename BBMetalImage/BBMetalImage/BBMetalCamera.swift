@@ -164,7 +164,7 @@ public class BBMetalCamera: NSObject {
     
     public var session: AVCaptureSession!
     private var camera: AVCaptureDevice!
-    private var videoInput: AVCaptureDeviceInput!
+    public var videoInput: AVCaptureDeviceInput!
     private var videoOutput: AVCaptureVideoDataOutput!
     private var videoOutputQueue: DispatchQueue!
     
