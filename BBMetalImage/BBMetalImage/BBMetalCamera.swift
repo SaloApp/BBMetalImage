@@ -566,6 +566,67 @@ public class BBMetalCamera: NSObject {
         return true
     }
     
+    public func setZoomLevel(_ zoomLevel: CGFloat) {
+        lock.wait()
+        session.beginConfiguration()
+        defer {
+            session.commitConfiguration()
+            lock.signal()
+        }
+        
+        let position = camera.camera.position
+        
+        let targetType: AVCaptureDevice.DeviceType = {
+            if position == .back && zoomLevel < 1.0 {
+                return .builtInUltraWideCamera
+            } else {
+                return .builtInWideAngleCamera
+            }
+        }()
+        
+        if camera.deviceType != targetType {
+            session.removeInput(videoInput)
+            if
+                let device = AVCaptureDevice.default(
+                    targetType,
+                    for: .video,
+                    position: position
+                ),
+                let input = try? AVCaptureDeviceInput(device: device)
+            {
+                videoInput = input
+                session.addInput(videoInput)
+                camera = device
+            }
+            
+            if
+                let connection = videoOutput.connections.first,
+                connection.isVideoOrientationSupported
+            {
+                originalOrientation = connection.videoOrientation
+                connection.videoOrientation = .portrait
+            }
+        }
+        
+        let factor: CGFloat = {
+            if camera.deviceType == .builtInUltraWideCamera {
+                return zoomLevel / 0.5
+            } else {
+                return zoomLevel
+            }
+        }()
+        
+        let clamped = max(dev.minAvailableVideoZoomFactor, min(factor, dev.maxAvailableVideoZoomFactor))
+        
+        do {
+            try camera.lockForConfiguration()
+            camera.videoZoomFactor = clamped
+            camera.unlockForConfiguration()
+        } catch {
+            print("Error for camera lockForConfiguration: \(error)")
+        }
+    }
+    
     /// Sets camera frame rate
     ///
     /// - Parameter frameRate: camera frame rate
