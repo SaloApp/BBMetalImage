@@ -569,9 +569,7 @@ public class BBMetalCamera: NSObject {
     @available(iOS 16, *)
     public func setZoomFactor(_ zoomLevel: CGFloat) {
         lock.wait()
-        session.beginConfiguration()
         defer {
-            session.commitConfiguration()
             lock.signal()
         }
         
@@ -586,6 +584,9 @@ public class BBMetalCamera: NSObject {
         }()
         
         if camera.deviceType != targetType {
+            
+            session.beginConfiguration()
+            
             session.removeInput(videoInput)
             if
                 let device = AVCaptureDevice.default(
@@ -607,6 +608,8 @@ public class BBMetalCamera: NSObject {
                 originalOrientation = connection.videoOrientation
                 connection.videoOrientation = .portrait
             }
+            
+            session.commitConfiguration()
         }
         
         let factor: CGFloat = {
