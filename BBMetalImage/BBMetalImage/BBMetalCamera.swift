@@ -566,7 +566,7 @@ public class BBMetalCamera: NSObject {
         return true
     }
     
-    public func setZoomLevel(_ zoomLevel: CGFloat) {
+    public func setZoomFactor(_ zoomLevel: CGFloat) {
         lock.wait()
         session.beginConfiguration()
         defer {
