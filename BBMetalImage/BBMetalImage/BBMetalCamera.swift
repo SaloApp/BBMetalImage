@@ -617,7 +617,7 @@ public class BBMetalCamera: NSObject {
             }
         }()
         
-        let clamped = max(dev.minAvailableVideoZoomFactor, min(factor, dev.maxAvailableVideoZoomFactor))
+        let clamped = max(camera.minAvailableVideoZoomFactor, min(factor, camera.maxAvailableVideoZoomFactor))
         
         do {
             try camera.lockForConfiguration()
