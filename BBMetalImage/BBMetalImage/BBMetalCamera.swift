@@ -566,6 +566,7 @@ public class BBMetalCamera: NSObject {
         return true
     }
     
+    @available(iOS 16, *)
     public func setZoomFactor(_ zoomLevel: CGFloat) {
         lock.wait()
         session.beginConfiguration()
