@@ -574,7 +574,7 @@ public class BBMetalCamera: NSObject {
             lock.signal()
         }
         
-        let position = camera.camera.position
+        let position = camera.position
         
         let targetType: AVCaptureDevice.DeviceType = {
             if position == .back && zoomLevel < 1.0 {
