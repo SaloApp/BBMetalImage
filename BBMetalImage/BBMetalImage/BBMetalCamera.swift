@@ -299,6 +299,10 @@ public class BBMetalCamera: NSObject {
         }
     }
     
+    public var currentAbsoluteZoomFactor: CGFloat {
+        camera.videoZoomFactor
+    }
+    
     /// Creates a camera
     /// - Parameters:
     ///   - sessionPreset: a constant value indicating the quality level or bit rate of the output
