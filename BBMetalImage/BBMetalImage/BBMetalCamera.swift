@@ -283,6 +283,22 @@ public class BBMetalCamera: NSObject {
     
     private var textureCache: CVMetalTextureCache!
     
+    public var currentDeviceDisplayVideoZoomFactorMultiplier: CGFloat {
+        if #available(iOS 18.0, *) {
+            return videoInput?.device.displayVideoZoomFactorMultiplier ?? 1.0
+        } else {
+            return 1.0
+        }
+    }
+    
+    public var isUltraWideBackCameraSupported: CGFloat {
+        if #available(iOS 18.0, *) {
+            return AVCaptureDevice.default(.builtInTripleCamera, for: .video, position: .back) != nil
+        } else {
+            return false
+        }
+    }
+    
     /// Creates a camera
     /// - Parameters:
     ///   - sessionPreset: a constant value indicating the quality level or bit rate of the output
@@ -309,7 +325,7 @@ public class BBMetalCamera: NSObject {
         
         super.init()
         
-        guard let videoDevice = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: position),
+        guard let videoDevice = selectDevice(forPosition: position),
             let videoDeviceInput = try? AVCaptureDeviceInput(device: videoDevice) else { return nil }
         
         session = captureSession
@@ -356,6 +372,38 @@ public class BBMetalCamera: NSObject {
             return nil
         }
         #endif
+    }
+    
+    private func selectDevice(forPosition position: AVCaptureDevice.Position) -> AVCaptureDevice? {
+        guard #available(iOS 18, *) else {
+            return AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: position)
+        }
+        
+        if position == .front {
+            return AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: position)
+        }
+        
+        if let device = AVCaptureDevice.default(
+            .builtInTripleCamera,
+            for: .video,
+            position: position
+        ) {
+            return device
+        } else if let device = AVCaptureDevice.default(
+            .builtInDualWideCamera,
+            for: .video,
+            position: position
+        ) {
+            return device
+        } else if let device = AVCaptureDevice.default(
+            .builtInDualCamera,
+            for: .video,
+            position: position
+        ) {
+            return device
+        } else {
+            return AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: position)
+        }
     }
     
     @discardableResult
@@ -545,7 +593,7 @@ public class BBMetalCamera: NSObject {
         var position: AVCaptureDevice.Position = .back
         if camera.position == .back { position = .front }
         
-        guard let videoDevice = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: position),
+        guard let videoDevice = selectDevice(forPosition: position),
             let videoDeviceInput = try? AVCaptureDeviceInput(device: videoDevice) else { return false }
         
         session.removeInput(videoInput)
@@ -567,67 +615,18 @@ public class BBMetalCamera: NSObject {
     }
     
     @available(iOS 16, *)
-    public func setZoomFactor(_ zoomLevel: CGFloat) {
-        lock.wait()
-        defer {
-            lock.signal()
-        }
+    public func setRelativeZoomFactor(_ relativeZoom: CGFloat) {
+        let absoluteZoom = relativeZoom / currentDeviceDisplayVideoZoomFactorMultiplier
         
-        let position = camera.position
+        self.setAbsoluteZoomFactor(absoluteZoom)
+    }
+    
+    @available(iOS 16, *)
+    public func setAbsoluteZoomFactor(_ absoluteZoom: CGFloat) {
+        let clampedZoom = max(camera.minAvailableVideoZoomFactor, min(absoluteZoom, camera.maxAvailableVideoZoomFactor))
         
-        let targetType: AVCaptureDevice.DeviceType = {
-            if position == .back && zoomLevel < 1.0 {
-                return .builtInUltraWideCamera
-            } else {
-                return .builtInWideAngleCamera
-            }
-        }()
-        
-        if camera.deviceType != targetType {
-            
-            session.beginConfiguration()
-            
-            session.removeInput(videoInput)
-            if
-                let device = AVCaptureDevice.default(
-                    targetType,
-                    for: .video,
-                    position: position
-                ),
-                let input = try? AVCaptureDeviceInput(device: device)
-            {
-                videoInput = input
-                session.addInput(videoInput)
-                camera = device
-            }
-            
-            if
-                let connection = videoOutput.connections.first,
-                connection.isVideoOrientationSupported
-            {
-                originalOrientation = connection.videoOrientation
-                connection.videoOrientation = .portrait
-            }
-            
-            session.commitConfiguration()
-        }
-        
-        let factor: CGFloat = {
-            if camera.deviceType == .builtInUltraWideCamera {
-                return zoomLevel / 0.5
-            } else {
-                return zoomLevel
-            }
-        }()
-        
-        let clamped = max(camera.minAvailableVideoZoomFactor, min(factor, camera.maxAvailableVideoZoomFactor))
-        
-        do {
-            try camera.lockForConfiguration()
-            camera.videoZoomFactor = clamped
-            camera.unlockForConfiguration()
-        } catch {
-            print("Error for camera lockForConfiguration: \(error)")
+        self.configureCamera {
+            $0.videoZoomFactor = clampedZoom
         }
     }
     
