@@ -283,6 +283,26 @@ public class BBMetalCamera: NSObject {
     
     private var textureCache: CVMetalTextureCache!
     
+    public var currentDeviceDisplayVideoZoomFactorMultiplier: CGFloat {
+        if #available(iOS 18.0, *) {
+            return videoInput?.device.displayVideoZoomFactorMultiplier ?? 1.0
+        } else {
+            return 1.0
+        }
+    }
+    
+    public var isUltraWideBackCameraSupported: Bool {
+        if #available(iOS 18.0, *) {
+            return AVCaptureDevice.default(.builtInTripleCamera, for: .video, position: .back) != nil
+        } else {
+            return false
+        }
+    }
+    
+    public var currentAbsoluteZoomFactor: CGFloat {
+        camera.videoZoomFactor
+    }
+    
     /// Creates a camera
     /// - Parameters:
     ///   - sessionPreset: a constant value indicating the quality level or bit rate of the output
@@ -309,7 +329,7 @@ public class BBMetalCamera: NSObject {
         
         super.init()
         
-        guard let videoDevice = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: position),
+        guard let videoDevice = selectDevice(forPosition: position),
             let videoDeviceInput = try? AVCaptureDeviceInput(device: videoDevice) else { return nil }
         
         session = captureSession
@@ -356,6 +376,38 @@ public class BBMetalCamera: NSObject {
             return nil
         }
         #endif
+    }
+    
+    private func selectDevice(forPosition position: AVCaptureDevice.Position) -> AVCaptureDevice? {
+        guard #available(iOS 18, *) else {
+            return AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: position)
+        }
+        
+        if position == .front {
+            return AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: position)
+        }
+        
+        if let device = AVCaptureDevice.default(
+            .builtInTripleCamera,
+            for: .video,
+            position: position
+        ) {
+            return device
+        } else if let device = AVCaptureDevice.default(
+            .builtInDualWideCamera,
+            for: .video,
+            position: position
+        ) {
+            return device
+        } else if let device = AVCaptureDevice.default(
+            .builtInDualCamera,
+            for: .video,
+            position: position
+        ) {
+            return device
+        } else {
+            return AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: position)
+        }
     }
     
     @discardableResult
@@ -545,7 +597,7 @@ public class BBMetalCamera: NSObject {
         var position: AVCaptureDevice.Position = .back
         if camera.position == .back { position = .front }
         
-        guard let videoDevice = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: position),
+        guard let videoDevice = selectDevice(forPosition: position),
             let videoDeviceInput = try? AVCaptureDeviceInput(device: videoDevice) else { return false }
         
         session.removeInput(videoInput)
@@ -564,6 +616,22 @@ public class BBMetalCamera: NSObject {
         connection.videoOrientation = .portrait
         
         return true
+    }
+    
+    @available(iOS 16, *)
+    public func setRelativeZoomFactor(_ relativeZoom: CGFloat) {
+        let absoluteZoom = relativeZoom / currentDeviceDisplayVideoZoomFactorMultiplier
+        
+        self.setAbsoluteZoomFactor(absoluteZoom)
+    }
+    
+    @available(iOS 16, *)
+    public func setAbsoluteZoomFactor(_ absoluteZoom: CGFloat) {
+        let clampedZoom = max(camera.minAvailableVideoZoomFactor, min(absoluteZoom, camera.maxAvailableVideoZoomFactor))
+        
+        self.configureCamera {
+            $0.videoZoomFactor = clampedZoom
+        }
     }
     
     /// Sets camera frame rate
