@@ -76,7 +76,12 @@ var videoWriter: BBMetalVideoWriter!
 
 func setup() {
     // Set up camera to capture image
-    camera = BBMetalCamera(sessionPreset: .hd1920x1080)
+    do {
+        camera = try BBMetalCamera(sessionPreset: .hd1920x1080)
+    } catch {
+        print("Failed to create camera: \(error)")
+        return
+    }
 
     // Set up 3 filters to process image
     let contrastFilter = BBMetalContrastFilter(contrast: 3)
@@ -129,7 +134,12 @@ var camera: BBMetalCamera!
 
 func setup() {
     // Set up camera to capture image
-    camera = BBMetalCamera(sessionPreset: .hd1920x1080)
+    do {
+        camera = try BBMetalCamera(sessionPreset: .hd1920x1080)
+    } catch {
+        print("Failed to create camera: \(error)")
+        return
+    }
 
     // Set up metal view to display image
     let metalView = BBMetalView(frame: frame)
@@ -190,7 +200,12 @@ var camera: BBMetalCamera!
 func setup() {
     // Set up camera to capture image
     // Set `canTakePhoto` to true and set `photoDelegate` to nonnull
-    camera = BBMetalCamera(sessionPreset: .hd1920x1080)
+    do {
+        camera = try BBMetalCamera(sessionPreset: .hd1920x1080)
+    } catch {
+        print("Failed to create camera: \(error)")
+        return
+    }
     camera.canTakePhoto = true
     camera.photoDelegate = self
 

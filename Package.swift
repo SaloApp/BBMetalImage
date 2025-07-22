@@ -4,17 +4,17 @@
 import PackageDescription
 
 let package = Package(
-    name: "BBMetalImage",
-    platforms: [.iOS(.v10)],
-    products: [
-        .library(name: "BBMetalImage", targets: ["BBMetalImage"]),
-    ],
-    targets: [
-        .target(
-            name: "BBMetalImage",
-            path: "BBMetalImage/BBMetalImage",
-            exclude: ["MultipleVideoSource.swift"],
-            resources: [.process("Shaders")]
-        ),
-    ]
+  name: "BBMetalImage",
+  platforms: [.iOS(.v12)],
+  products: [
+    .library(name: "BBMetalImage", targets: ["BBMetalImage"])
+  ],
+  targets: [
+    .target(
+      name: "BBMetalImage",
+      path: "BBMetalImage/BBMetalImage",
+      exclude: ["MultipleVideoSource.swift"],
+      resources: [.process("Shaders")]
+    )
+  ]
 )

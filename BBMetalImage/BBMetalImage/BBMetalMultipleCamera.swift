@@ -19,14 +19,11 @@ public class BBMetalMultipleCamera {
     public let backCamera: BBMetalCamera
     public let frontCamera: BBMetalCamera
     
-    public init?() {
+    public init() throws {
         session = .init()
         
-        guard let backCamera = BBMetalCamera(captureSession: session, position: .back) else { return nil }
-        self.backCamera = backCamera
-        
-        guard let frontCamera = BBMetalCamera(captureSession: session, position: .front) else { return nil }
-        self.frontCamera = frontCamera
+        self.backCamera = try BBMetalCamera(captureSession: session, position: .back)
+        self.frontCamera = try BBMetalCamera(captureSession: session, position: .front)
     }
 
 }

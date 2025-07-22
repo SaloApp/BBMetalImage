@@ -10,948 +10,1015 @@ import AVFoundation
 
 /// Camera photo delegate defines handling taking photo result behaviors
 public protocol BBMetalCameraPhotoDelegate: AnyObject {
-    /// Called when camera did take a photo and get Metal texture
-    ///
-    /// - Parameters:
-    ///   - camera: camera to use
-    ///   - texture: Metal texture of the original photo which is not filtered
-    func camera(_ camera: BBMetalCamera, didOutput texture: MTLTexture)
-    
-    /// Called when camera fail taking a photo
-    ///
-    /// - Parameters:
-    ///   - camera: camera to use
-    ///   - error: error for taking the photo
-    func camera(_ camera: BBMetalCamera, didFail error: Error)
+  /// Called when camera did take a photo and get Metal texture
+  ///
+  /// - Parameters:
+  ///   - camera: camera to use
+  ///   - texture: Metal texture of the original photo which is not filtered
+  func camera(_ camera: BBMetalCamera, didOutput texture: MTLTexture)
+
+  /// Called when camera fail taking a photo
+  ///
+  /// - Parameters:
+  ///   - camera: camera to use
+  ///   - error: error for taking the photo
+  func camera(_ camera: BBMetalCamera, didFail error: Error)
 }
 
 public protocol BBMetalCameraMetadataObjectDelegate: AnyObject {
-    /// Called when camera did get metadata objects
-    ///
-    /// - Parameters:
-    ///   - camera: camera to use
-    ///   - metadataObjects: metadata objects
-    func camera(_ camera: BBMetalCamera, didOutput metadataObjects: [AVMetadataObject])
+  /// Called when camera did get metadata objects
+  ///
+  /// - Parameters:
+  ///   - camera: camera to use
+  ///   - metadataObjects: metadata objects
+  func camera(_ camera: BBMetalCamera, didOutput metadataObjects: [AVMetadataObject])
 }
 
 public enum BBMetalCameraError: Error {
-    case cannotAddAudioInput
-    case cannotAddAudioOutput
+  case cannotAddAudioInput
+  case cannotAddAudioOutput
+  case noVideoDevice
+  case cannotCreateVideoInput
+  case cannotAddVideoInput
+  case cannotAddVideoOutput
+  case videoOrientationNotSupported
+  case cannotCreateMetalTextureCache
 }
 
 /// Camera capturing image and providing Metal texture
 public class BBMetalCamera: NSObject {
-    /// Image consumers
-    public var consumers: [BBMetalImageConsumer] {
-        lock.wait()
-        let c = _consumers
-        lock.signal()
-        return c
+  /// Image consumers
+  public var consumers: [BBMetalImageConsumer] {
+    lock.wait()
+    let c = _consumers
+    lock.signal()
+    return c
+  }
+  private var _consumers: [BBMetalImageConsumer]
+
+  /// A block to call before processing each video sample buffer
+  public var preprocessVideo: ((CMSampleBuffer) -> Void)? {
+    get {
+      lock.wait()
+      let p = _preprocessVideo
+      lock.signal()
+      return p
     }
-    private var _consumers: [BBMetalImageConsumer]
-    
-    /// A block to call before processing each video sample buffer
-    public var preprocessVideo: ((CMSampleBuffer) -> Void)? {
-        get {
-            lock.wait()
-            let p = _preprocessVideo
-            lock.signal()
-            return p
-        }
-        set {
-            lock.wait()
-            _preprocessVideo = newValue
-            lock.signal()
-        }
+    set {
+      lock.wait()
+      _preprocessVideo = newValue
+      lock.signal()
     }
-    private var _preprocessVideo: ((CMSampleBuffer) -> Void)?
-    
-    /// A block to call before transmiting texture to image consumers
-    public var willTransmitTexture: ((MTLTexture, CMTime) -> Void)? {
-        get {
-            lock.wait()
-            let w = _willTransmitTexture
-            lock.signal()
-            return w
-        }
-        set {
-            lock.wait()
-            _willTransmitTexture = newValue
-            lock.signal()
-        }
+  }
+  private var _preprocessVideo: ((CMSampleBuffer) -> Void)?
+
+  /// A block to call before transmiting texture to image consumers
+  public var willTransmitTexture: ((MTLTexture, CMTime) -> Void)? {
+    get {
+      lock.wait()
+      let w = _willTransmitTexture
+      lock.signal()
+      return w
     }
-    private var _willTransmitTexture: ((MTLTexture, CMTime) -> Void)?
-    
-    /// Camera position
-    public var position: AVCaptureDevice.Position { return camera.position }
-    
-    /// Camera active format
-    public var activeFormat: AVCaptureDevice.Format { camera.activeFormat }
-    
-    /// Output texture size
-    public var textureSize: BBMetalIntSize {
-        lock.wait()
-        let dimensions = CMVideoFormatDescriptionGetDimensions(camera.activeFormat.formatDescription)
-        var size = BBMetalIntSize(width: Int(dimensions.width), height: Int(dimensions.height))
-        if let orientation = videoOutput.connections.first?.videoOrientation {
-            let isLandscape: (AVCaptureVideoOrientation) -> Bool = { orientation in
-                orientation == .landscapeLeft || orientation == .landscapeRight
-            }
-            if isLandscape(orientation) != isLandscape(originalOrientation) {
-                swap(&size.width, &size.height)
-            }
-        }
-        lock.signal()
-        return size
+    set {
+      lock.wait()
+      _willTransmitTexture = newValue
+      lock.signal()
     }
-    
-    public var videoOrientation: AVCaptureVideoOrientation {
-        get {
-            lock.wait()
-            let v = videoOutput.connections.first?.videoOrientation ?? .portrait
-            lock.signal()
-            return v
-        }
-        set {
-            lock.wait()
-            if let connection = videoOutput.connections.first,
-               connection.isVideoOrientationSupported {
-                connection.videoOrientation = newValue
-            }
-            lock.signal()
-        }
+  }
+  private var _willTransmitTexture: ((MTLTexture, CMTime) -> Void)?
+
+  /// Camera position
+  public var position: AVCaptureDevice.Position { return camera.position }
+
+  /// Camera active format
+  public var activeFormat: AVCaptureDevice.Format { camera.activeFormat }
+
+  /// Output texture size
+  public var textureSize: BBMetalIntSize {
+    lock.wait()
+    let dimensions = CMVideoFormatDescriptionGetDimensions(camera.activeFormat.formatDescription)
+    var size = BBMetalIntSize(width: Int(dimensions.width), height: Int(dimensions.height))
+    if let orientation = videoOutput.connections.first?.videoOrientation {
+      let isLandscape: (AVCaptureVideoOrientation) -> Bool = { orientation in
+        orientation == .landscapeLeft || orientation == .landscapeRight
+      }
+      if isLandscape(orientation) != isLandscape(originalOrientation) {
+        swap(&size.width, &size.height)
+      }
     }
-    
-    private var originalOrientation: AVCaptureVideoOrientation
-    
-    /// Whether to run benchmark or not.
-    /// Running benchmark records frame duration.
-    /// False by default.
-    public var benchmark: Bool {
-        get {
-            lock.wait()
-            let b = _benchmark
-            lock.signal()
-            return b
-        }
-        set {
-            lock.wait()
-            _benchmark = newValue
-            lock.signal()
-        }
+    lock.signal()
+    return size
+  }
+
+  public var videoOrientation: AVCaptureVideoOrientation {
+    get {
+      lock.wait()
+      let v = videoOutput.connections.first?.videoOrientation ?? .portrait
+      lock.signal()
+      return v
     }
-    private var _benchmark: Bool
-    
-    /// Average frame duration, or 0 if not valid value.
-    /// To get valid value, set `benchmark` to true.
-    public var averageFrameDuration: Double {
-        lock.wait()
-        let d = capturedFrameCount > ignoreInitialFrameCount ? totalCaptureFrameTime / Double(capturedFrameCount - ignoreInitialFrameCount) : 0
-        lock.signal()
-        return d
+    set {
+      lock.wait()
+      if let connection = videoOutput.connections.first,
+        connection.isVideoOrientationSupported
+      {
+        connection.videoOrientation = newValue
+      }
+      lock.signal()
     }
-    
-    /// true means it's separate audio session
-    public var sessionInterruptionHandler: ((AVCaptureSession, AVCaptureSession.InterruptionReason, Bool) -> Void)?
-    /// true means it's separate audio session
-    public var sessionErrorHandler: ((AVCaptureSession, AVError, Bool) -> Void)?
-    
-    private var capturedFrameCount: Int
-    private var totalCaptureFrameTime: Double
-    private let ignoreInitialFrameCount: Int
-    
-    private let lock: DispatchSemaphore
-    
-    private var session: AVCaptureSession!
-    private var camera: AVCaptureDevice!
-    private var videoInput: AVCaptureDeviceInput!
-    private var videoOutput: AVCaptureVideoDataOutput!
-    private var videoOutputQueue: DispatchQueue!
-    
-    private let multitpleSessions: Bool
-    private var audioSession: AVCaptureSession!
-    private var audioInput: AVCaptureDeviceInput!
-    private var audioOutput: AVCaptureAudioDataOutput!
-    private var audioOutputQueue: DispatchQueue!
-    
-    /// Audio consumer processing audio sample buffer.
-    /// Set this property to nil (default value) if not recording audio.
-    /// Set this property to a given audio consumer if recording audio.
-    public var audioConsumer: BBMetalAudioConsumer? {
-        get {
-            lock.wait()
-            let a = _audioConsumer
-            lock.signal()
-            return a
-        }
-        set {
-            lock.wait()
-            audioConsumerAssignError = nil
-            _audioConsumer = newValue
-            if newValue != nil {
-                if let error = addAudioInputAndOutput() {
-                    _audioConsumer = nil
-                    audioConsumerAssignError = error
-                }
-            } else {
-                removeAudioInputAndOutput()
-            }
-            lock.signal()
-        }
+  }
+
+  private var originalOrientation: AVCaptureVideoOrientation
+
+  /// Whether to run benchmark or not.
+  /// Running benchmark records frame duration.
+  /// False by default.
+  public var benchmark: Bool {
+    get {
+      lock.wait()
+      let b = _benchmark
+      lock.signal()
+      return b
     }
-    public var audioConsumerAssignError: Error?
-    private var _audioConsumer: BBMetalAudioConsumer?
-    
-    private var photoOutput: AVCapturePhotoOutput!
-    
-    /// Whether can take photo or not.
-    /// Set this property to true before calling `takePhoto()` method.
-    public var canTakePhoto: Bool {
-        get {
-            lock.wait()
-            let c = _canTakePhoto
-            lock.signal()
-            return c
-        }
-        set {
-            lock.wait()
-            _canTakePhoto = newValue
-            if newValue {
-                if !addPhotoOutput() { _canTakePhoto = false }
-            } else {
-                removePhotoOutput()
-            }
-            lock.signal()
-        }
+    set {
+      lock.wait()
+      _benchmark = newValue
+      lock.signal()
     }
-    private var _canTakePhoto: Bool
-    
-    /// Camera photo delegate handling taking photo result.
-    /// To take photo, this property should not be nil.
-    public weak var photoDelegate: BBMetalCameraPhotoDelegate? {
-        get {
-            lock.wait()
-            let p = _photoDelegate
-            lock.signal()
-            return p
-        }
-        set {
-            lock.wait()
-            _photoDelegate = newValue
-            lock.signal()
-        }
+  }
+  private var _benchmark: Bool
+
+  /// Average frame duration, or 0 if not valid value.
+  /// To get valid value, set `benchmark` to true.
+  public var averageFrameDuration: Double {
+    lock.wait()
+    let d =
+      capturedFrameCount > ignoreInitialFrameCount
+      ? totalCaptureFrameTime / Double(capturedFrameCount - ignoreInitialFrameCount) : 0
+    lock.signal()
+    return d
+  }
+
+  /// true means it's separate audio session
+  public var sessionInterruptionHandler:
+    ((AVCaptureSession, AVCaptureSession.InterruptionReason, Bool) -> Void)?
+  /// true means it's separate audio session
+  public var sessionErrorHandler: ((AVCaptureSession, AVError, Bool) -> Void)?
+
+  private var capturedFrameCount: Int
+  private var totalCaptureFrameTime: Double
+  private let ignoreInitialFrameCount: Int
+
+  private let lock: DispatchSemaphore
+
+  private var session: AVCaptureSession!
+  private var camera: AVCaptureDevice!
+  private var videoInput: AVCaptureDeviceInput!
+  private var videoOutput: AVCaptureVideoDataOutput!
+  private var videoOutputQueue: DispatchQueue!
+
+  private let multitpleSessions: Bool
+  private var audioSession: AVCaptureSession!
+  private var audioInput: AVCaptureDeviceInput!
+  private var audioOutput: AVCaptureAudioDataOutput!
+  private var audioOutputQueue: DispatchQueue!
+
+  /// Audio consumer processing audio sample buffer.
+  /// Set this property to nil (default value) if not recording audio.
+  /// Set this property to a given audio consumer if recording audio.
+  public var audioConsumer: BBMetalAudioConsumer? {
+    get {
+      lock.wait()
+      let a = _audioConsumer
+      lock.signal()
+      return a
     }
-    private weak var _photoDelegate: BBMetalCameraPhotoDelegate?
-    
-    private var _needPhoto: Bool
-    
-    private var _capturePhotoCompletion: BBMetalFilterCompletion?
-    
-    private var metadataOutput: AVCaptureMetadataOutput!
-    private var metadataOutputQueue: DispatchQueue!
-    
-    public weak var metadataObjectDelegate: BBMetalCameraMetadataObjectDelegate? {
-        get {
-            lock.wait()
-            let m = _metadataObjectDelegate
-            lock.signal()
-            return m
+    set {
+      lock.wait()
+      audioConsumerAssignError = nil
+      _audioConsumer = newValue
+      if newValue != nil {
+        if let error = addAudioInputAndOutput() {
+          _audioConsumer = nil
+          audioConsumerAssignError = error
         }
-        set {
-            lock.wait()
-            _metadataObjectDelegate = newValue
-            lock.signal()
-        }
+      } else {
+        removeAudioInputAndOutput()
+      }
+      lock.signal()
     }
-    private weak var _metadataObjectDelegate: BBMetalCameraMetadataObjectDelegate?
-    
-    /// When this property is false, received video/audio sample buffer will not be processed
-    public var isPaused: Bool {
-        get {
-            lock.wait()
-            let p = _isPaused
-            lock.signal()
-            return p
-        }
-        set {
-            lock.wait()
-            _isPaused = newValue
-            lock.signal()
-        }
+  }
+  public var audioConsumerAssignError: Error?
+  private var _audioConsumer: BBMetalAudioConsumer?
+
+  private var photoOutput: AVCapturePhotoOutput!
+
+  /// Whether can take photo or not.
+  /// Set this property to true before calling `takePhoto()` method.
+  public var canTakePhoto: Bool {
+    get {
+      lock.wait()
+      let c = _canTakePhoto
+      lock.signal()
+      return c
     }
-    private var _isPaused: Bool
-    
-    private var textureCache: CVMetalTextureCache!
-    
-    public var currentDeviceDisplayVideoZoomFactorMultiplier: CGFloat {
-        if #available(iOS 18.0, *) {
-            return videoInput?.device.displayVideoZoomFactorMultiplier ?? 1.0
-        } else {
-            return 1.0
-        }
+    set {
+      lock.wait()
+      _canTakePhoto = newValue
+      if newValue {
+        if !addPhotoOutput() { _canTakePhoto = false }
+      } else {
+        removePhotoOutput()
+      }
+      lock.signal()
     }
-    
-    public var isUltraWideBackCameraSupported: Bool {
-        if #available(iOS 18.0, *) {
-            return AVCaptureDevice.default(.builtInTripleCamera, for: .video, position: .back) != nil
-        } else {
-            return false
-        }
+  }
+  private var _canTakePhoto: Bool
+
+  /// Camera photo delegate handling taking photo result.
+  /// To take photo, this property should not be nil.
+  public weak var photoDelegate: BBMetalCameraPhotoDelegate? {
+    get {
+      lock.wait()
+      let p = _photoDelegate
+      lock.signal()
+      return p
     }
-    
-    public var currentAbsoluteZoomFactor: CGFloat {
-        camera.videoZoomFactor
+    set {
+      lock.wait()
+      _photoDelegate = newValue
+      lock.signal()
     }
-    
-    /// Creates a camera
-    /// - Parameters:
-    ///   - sessionPreset: a constant value indicating the quality level or bit rate of the output
-    ///   - position: camera position
-    ///   - multitpleSessions: whether to use independent video session and audio session (false by default). Switching camera position while recording leads to the video and audio out of sync.
-    /// Set true if we allow the user to switch camera position while recording.
-    public init?(
-        captureSession: AVCaptureSession = .init(),
-        sessionPreset: AVCaptureSession.Preset = .high,
-        position: AVCaptureDevice.Position = .back,
-        multitpleSessions: Bool = false
+  }
+  private weak var _photoDelegate: BBMetalCameraPhotoDelegate?
+
+  private var _needPhoto: Bool
+
+  private var _capturePhotoCompletion: BBMetalFilterCompletion?
+
+  private var metadataOutput: AVCaptureMetadataOutput!
+  private var metadataOutputQueue: DispatchQueue!
+
+  public weak var metadataObjectDelegate: BBMetalCameraMetadataObjectDelegate? {
+    get {
+      lock.wait()
+      let m = _metadataObjectDelegate
+      lock.signal()
+      return m
+    }
+    set {
+      lock.wait()
+      _metadataObjectDelegate = newValue
+      lock.signal()
+    }
+  }
+  private weak var _metadataObjectDelegate: BBMetalCameraMetadataObjectDelegate?
+
+  /// When this property is false, received video/audio sample buffer will not be processed
+  public var isPaused: Bool {
+    get {
+      lock.wait()
+      let p = _isPaused
+      lock.signal()
+      return p
+    }
+    set {
+      lock.wait()
+      _isPaused = newValue
+      lock.signal()
+    }
+  }
+  private var _isPaused: Bool
+
+  private var textureCache: CVMetalTextureCache!
+
+  public var currentDeviceDisplayVideoZoomFactorMultiplier: CGFloat {
+    if #available(iOS 18.0, *) {
+      return videoInput?.device.displayVideoZoomFactorMultiplier ?? 1.0
+    } else {
+      return 1.0
+    }
+  }
+
+  public var isUltraWideBackCameraSupported: Bool {
+    if #available(iOS 18.0, *) {
+      return AVCaptureDevice.default(.builtInTripleCamera, for: .video, position: .back) != nil
+    } else {
+      return false
+    }
+  }
+
+  public var currentAbsoluteZoomFactor: CGFloat {
+    camera.videoZoomFactor
+  }
+
+  /// Creates a camera
+  /// - Parameters:
+  ///   - sessionPreset: a constant value indicating the quality level or bit rate of the output
+  ///   - position: camera position
+  ///   - multitpleSessions: whether to use independent video session and audio session (false by default). Switching camera position while recording leads to the video and audio out of sync.
+  /// Set true if we allow the user to switch camera position while recording.
+  public init(
+    captureSession: AVCaptureSession = .init(),
+    sessionPreset: AVCaptureSession.Preset = .high,
+    position: AVCaptureDevice.Position = .back,
+    multitpleSessions: Bool = false
+  ) throws {
+    _consumers = []
+    _canTakePhoto = false
+    _needPhoto = false
+    _isPaused = false
+    _benchmark = false
+    capturedFrameCount = 0
+    totalCaptureFrameTime = 0
+    ignoreInitialFrameCount = 5
+    originalOrientation = .portrait
+    self.multitpleSessions = multitpleSessions
+    lock = DispatchSemaphore(value: 1)
+
+    super.init()
+
+    guard let videoDevice = selectDevice(forPosition: position) else {
+      throw BBMetalCameraError.noVideoDevice
+    }
+
+    guard let videoDeviceInput = try? AVCaptureDeviceInput(device: videoDevice) else {
+      throw BBMetalCameraError.cannotCreateVideoInput
+    }
+
+    session = captureSession
+    session.automaticallyConfiguresApplicationAudioSession = false
+    session.beginConfiguration()
+
+    if !(session is AVCaptureMultiCamSession) {
+      session.sessionPreset = sessionPreset
+    }
+
+    if !session.canAddInput(videoDeviceInput) {
+      session.commitConfiguration()
+      throw BBMetalCameraError.cannotAddVideoInput
+    }
+
+    session.addInput(videoDeviceInput)
+    camera = videoDevice
+    videoInput = videoDeviceInput
+
+    let videoDataOutput = AVCaptureVideoDataOutput()
+    videoDataOutput.videoSettings = [
+      kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA
+    ]
+    videoOutputQueue = DispatchQueue(label: "com.Kaibo.BBMetalImage.Camera.videoOutput")
+    videoDataOutput.setSampleBufferDelegate(self, queue: videoOutputQueue)
+    if !session.canAddOutput(videoDataOutput) {
+      session.commitConfiguration()
+      throw BBMetalCameraError.cannotAddVideoOutput
+    }
+    session.addOutput(videoDataOutput)
+    videoOutput = videoDataOutput
+
+    guard let connection = videoDataOutput.connections.first,
+      connection.isVideoOrientationSupported
+    else {
+      session.commitConfiguration()
+      throw BBMetalCameraError.videoOrientationNotSupported
+    }
+    originalOrientation = connection.videoOrientation
+    connection.videoOrientation = .portrait
+
+    session.commitConfiguration()
+
+    #if !targetEnvironment(simulator)
+      if CVMetalTextureCacheCreate(
+        kCFAllocatorDefault, nil, BBMetalDevice.sharedDevice, nil, &textureCache)
+        != kCVReturnSuccess || textureCache == nil
+      {
+        throw BBMetalCameraError.cannotCreateMetalTextureCache
+      }
+    #endif
+  }
+
+  private func selectDevice(forPosition position: AVCaptureDevice.Position) -> AVCaptureDevice? {
+    guard #available(iOS 18, *) else {
+      return AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: position)
+    }
+
+    if position == .front {
+      return AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: position)
+    }
+
+    if let device = AVCaptureDevice.default(
+      .builtInTripleCamera,
+      for: .video,
+      position: position
     ) {
-        _consumers = []
-        _canTakePhoto = false
-        _needPhoto = false
-        _isPaused = false
-        _benchmark = false
-        capturedFrameCount = 0
-        totalCaptureFrameTime = 0
-        ignoreInitialFrameCount = 5
-        originalOrientation = .portrait
-        self.multitpleSessions = multitpleSessions
-        lock = DispatchSemaphore(value: 1)
-        
-        super.init()
-        
-        guard let videoDevice = selectDevice(forPosition: position),
-            let videoDeviceInput = try? AVCaptureDeviceInput(device: videoDevice) else { return nil }
-        
-        session = captureSession
-        session.automaticallyConfiguresApplicationAudioSession = false
-        session.beginConfiguration()
-        
-        if !(session is AVCaptureMultiCamSession) {
-            session.sessionPreset = sessionPreset
-        }
-        
-        if !session.canAddInput(videoDeviceInput) {
-            session.commitConfiguration()
-            return nil
-        }
-        
-        session.addInput(videoDeviceInput)
-        camera = videoDevice
-        videoInput = videoDeviceInput
-        
-        let videoDataOutput = AVCaptureVideoDataOutput()
-        videoDataOutput.videoSettings = [kCVPixelBufferPixelFormatTypeKey as String : kCVPixelFormatType_32BGRA]
-        videoOutputQueue = DispatchQueue(label: "com.Kaibo.BBMetalImage.Camera.videoOutput")
-        videoDataOutput.setSampleBufferDelegate(self, queue: videoOutputQueue)
-        if !session.canAddOutput(videoDataOutput) {
-            session.commitConfiguration()
-            return nil
-        }
-        session.addOutput(videoDataOutput)
-        videoOutput = videoDataOutput
-        
-        guard let connection = videoDataOutput.connections.first,
-            connection.isVideoOrientationSupported else {
-                session.commitConfiguration()
-                return nil
-        }
-        originalOrientation = connection.videoOrientation
-        connection.videoOrientation = .portrait
-        
-        session.commitConfiguration()
-        
-        #if !targetEnvironment(simulator)
-        if CVMetalTextureCacheCreate(kCFAllocatorDefault, nil, BBMetalDevice.sharedDevice, nil, &textureCache) != kCVReturnSuccess ||
-            textureCache == nil {
-            return nil
-        }
-        #endif
-    }
-    
-    private func selectDevice(forPosition position: AVCaptureDevice.Position) -> AVCaptureDevice? {
-        guard #available(iOS 18, *) else {
-            return AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: position)
-        }
-        
-        if position == .front {
-            return AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: position)
-        }
-        
-        if let device = AVCaptureDevice.default(
-            .builtInTripleCamera,
-            for: .video,
-            position: position
-        ) {
-            return device
-        } else if let device = AVCaptureDevice.default(
-            .builtInDualWideCamera,
-            for: .video,
-            position: position
-        ) {
-            return device
-        } else if let device = AVCaptureDevice.default(
-            .builtInDualCamera,
-            for: .video,
-            position: position
-        ) {
-            return device
-        } else {
-            return AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: position)
-        }
-    }
-    
-    @discardableResult
-    private func addAudioInputAndOutput() -> Error? {
-        if audioOutput != nil { return nil }
-        
-        var session: AVCaptureSession = self.session
-        if multitpleSessions {
-            session = AVCaptureSession()
-            session.automaticallyConfiguresApplicationAudioSession = false
-            audioSession = session
-        }
-        
-        session.beginConfiguration()
-        defer {
-            session.commitConfiguration()
-            if multitpleSessions, self.session.isRunning {
-                audioSession.startRunning()
-            }
-        }
-        
-        guard let audioDevice = AVCaptureDevice.default(for: .audio),
-            let input = try? AVCaptureDeviceInput(device: audioDevice),
-            session.canAddInput(input) else {
-            print("Can not add audio input")
-            return BBMetalCameraError.cannotAddAudioInput
-        }
-        session.addInput(input)
-        audioInput = input
-        
-        let output = AVCaptureAudioDataOutput()
-        let outputQueue = DispatchQueue(label: "com.Kaibo.BBMetalImage.Camera.audioOutput")
-        output.setSampleBufferDelegate(self, queue: outputQueue)
-        guard session.canAddOutput(output) else {
-            _removeAudioInputAndOutput()
-            print("Can not add audio output")
-            return BBMetalCameraError.cannotAddAudioOutput
-        }
-        session.addOutput(output)
-        audioOutput = output
-        audioOutputQueue = outputQueue
-        
-        return nil
-    }
-    
-    private func removeAudioInputAndOutput() {
-        session.beginConfiguration()
-        _removeAudioInputAndOutput()
-        session.commitConfiguration()
-    }
-    
-    private func _removeAudioInputAndOutput() {
-        let session: AVCaptureSession = multitpleSessions ? audioSession : self.session
-        if let input = audioInput {
-            session.removeInput(input)
-            audioInput = nil
-        }
-        if let output = audioOutput {
-            session.removeOutput(output)
-            audioOutput = nil
-        }
-        if audioOutputQueue != nil {
-            audioOutputQueue = nil
-        }
-        if audioSession != nil {
-            audioSession = nil
-        }
-    }
-    
-    @discardableResult
-    private func addPhotoOutput() -> Bool {
-        if photoOutput != nil { return true }
-        
-        session.beginConfiguration()
-        defer { session.commitConfiguration() }
-        
-        let output = AVCapturePhotoOutput()
-        if !session.canAddOutput(output) {
-            print("Can not add photo output")
-            return false
-        }
-        session.addOutput(output)
-        photoOutput = output
-        
-        return true
-    }
-    
-    private func removePhotoOutput() {
-        session.beginConfiguration()
-        if let output = photoOutput { session.removeOutput(output) }
-        session.commitConfiguration()
-    }
-    
-    @discardableResult
-    public func addMetadataOutput(with types: [AVMetadataObject.ObjectType]) -> Bool {
-        var result = false
-        
-        lock.wait()
-        
-        if metadataOutput != nil {
-            lock.signal()
-            return result
-        }
-        
-        session.beginConfiguration()
-        
-        let output = AVCaptureMetadataOutput()
-        let outputQueue = DispatchQueue(label: "com.Kaibo.BBMetalImage.Camera.metadataOutput")
-        output.setMetadataObjectsDelegate(self, queue: outputQueue)
-        
-        if session.canAddOutput(output) {
-            session.addOutput(output)
-            let validTypes = types.filter { output.availableMetadataObjectTypes.contains($0) }
-            output.metadataObjectTypes = validTypes
-            metadataOutput = output
-            metadataOutputQueue = outputQueue
-            result = true
-        }
-        
-        session.commitConfiguration()
-        lock.signal()
-        return result
-    }
-    
-    public func removeMetadataOutput() {
-        lock.wait()
-        
-        if metadataOutput == nil {
-            lock.signal()
-            return
-        }
-        
-        session.beginConfiguration()
-        
-        session.removeOutput(metadataOutput)
-        metadataOutput = nil
-        metadataOutputQueue = nil
-        
-        session.commitConfiguration()
-        lock.signal()
-    }
-    
-    /// Captures frame texture as a photo.
-    /// Get original frame texture in the completion closure.
-    /// To get filtered texture, use `addCompletedHandler(_:)` method of `BBMetalBaseFilter`, check whether the filtered texture is camera photo.
-    /// This method is much faster than `takePhoto()` method.
-    /// - Parameter completion: a closure to call after capturing. If success, get original frame texture. If failure, get error.
-    public func capturePhoto(completion: BBMetalFilterCompletion? = nil) {
-        lock.wait()
-        _needPhoto = true
-        _capturePhotoCompletion = completion
-        lock.signal()
-    }
-    
-    /// Takes a photo.
-    /// Before calling this method, set `canTakePhoto` property to true and `photoDelegate` property to nonnull.
-    /// Get original frame texture in `camera(_:didOutput:)` method of `BBMetalCameraPhotoDelegate`.
-    /// To get filtered texture, use `capturePhoto(completion:)` method, or create new filter to process the original frame texture.
-    public func takePhoto(
-        flashMode: AVCaptureDevice.FlashMode = .off
+      return device
+    } else if let device = AVCaptureDevice.default(
+      .builtInDualWideCamera,
+      for: .video,
+      position: position
     ) {
-        lock.wait()
-        if let output = photoOutput, _photoDelegate != nil {
-            let currentSettings = AVCapturePhotoSettings(format: [
-                kCVPixelBufferPixelFormatTypeKey as String : kCVPixelFormatType_32BGRA
-            ])
-            if camera.hasFlash {
-                currentSettings.flashMode = flashMode
+      return device
+    } else if let device = AVCaptureDevice.default(
+      .builtInDualCamera,
+      for: .video,
+      position: position
+    ) {
+      return device
+    } else {
+      return AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: position)
+    }
+  }
+
+  @discardableResult
+  private func addAudioInputAndOutput() -> Error? {
+    if audioOutput != nil { return nil }
+
+    var session: AVCaptureSession = self.session
+    if multitpleSessions {
+      session = AVCaptureSession()
+      session.automaticallyConfiguresApplicationAudioSession = false
+      audioSession = session
+    }
+
+    session.beginConfiguration()
+    defer {
+      session.commitConfiguration()
+      if multitpleSessions, self.session.isRunning {
+        audioSession.startRunning()
+      }
+    }
+
+    guard let audioDevice = AVCaptureDevice.default(for: .audio),
+      let input = try? AVCaptureDeviceInput(device: audioDevice),
+      session.canAddInput(input)
+    else {
+      print("Can not add audio input")
+      return BBMetalCameraError.cannotAddAudioInput
+    }
+    session.addInput(input)
+    audioInput = input
+
+    let output = AVCaptureAudioDataOutput()
+    let outputQueue = DispatchQueue(label: "com.Kaibo.BBMetalImage.Camera.audioOutput")
+    output.setSampleBufferDelegate(self, queue: outputQueue)
+    guard session.canAddOutput(output) else {
+      _removeAudioInputAndOutput()
+      print("Can not add audio output")
+      return BBMetalCameraError.cannotAddAudioOutput
+    }
+    session.addOutput(output)
+    audioOutput = output
+    audioOutputQueue = outputQueue
+
+    return nil
+  }
+
+  private func removeAudioInputAndOutput() {
+    session.beginConfiguration()
+    _removeAudioInputAndOutput()
+    session.commitConfiguration()
+  }
+
+  private func _removeAudioInputAndOutput() {
+    let session: AVCaptureSession = multitpleSessions ? audioSession : self.session
+    if let input = audioInput {
+      session.removeInput(input)
+      audioInput = nil
+    }
+    if let output = audioOutput {
+      session.removeOutput(output)
+      audioOutput = nil
+    }
+    if audioOutputQueue != nil {
+      audioOutputQueue = nil
+    }
+    if audioSession != nil {
+      audioSession = nil
+    }
+  }
+
+  @discardableResult
+  private func addPhotoOutput() -> Bool {
+    if photoOutput != nil { return true }
+
+    session.beginConfiguration()
+    defer { session.commitConfiguration() }
+
+    let output = AVCapturePhotoOutput()
+    if !session.canAddOutput(output) {
+      print("Can not add photo output")
+      return false
+    }
+    session.addOutput(output)
+    photoOutput = output
+
+    return true
+  }
+
+  private func removePhotoOutput() {
+    session.beginConfiguration()
+    if let output = photoOutput { session.removeOutput(output) }
+    session.commitConfiguration()
+  }
+
+  @discardableResult
+  public func addMetadataOutput(with types: [AVMetadataObject.ObjectType]) -> Bool {
+    var result = false
+
+    lock.wait()
+
+    if metadataOutput != nil {
+      lock.signal()
+      return result
+    }
+
+    session.beginConfiguration()
+
+    let output = AVCaptureMetadataOutput()
+    let outputQueue = DispatchQueue(label: "com.Kaibo.BBMetalImage.Camera.metadataOutput")
+    output.setMetadataObjectsDelegate(self, queue: outputQueue)
+
+    if session.canAddOutput(output) {
+      session.addOutput(output)
+      let validTypes = types.filter { output.availableMetadataObjectTypes.contains($0) }
+      output.metadataObjectTypes = validTypes
+      metadataOutput = output
+      metadataOutputQueue = outputQueue
+      result = true
+    }
+
+    session.commitConfiguration()
+    lock.signal()
+    return result
+  }
+
+  public func removeMetadataOutput() {
+    lock.wait()
+
+    if metadataOutput == nil {
+      lock.signal()
+      return
+    }
+
+    session.beginConfiguration()
+
+    session.removeOutput(metadataOutput)
+    metadataOutput = nil
+    metadataOutputQueue = nil
+
+    session.commitConfiguration()
+    lock.signal()
+  }
+
+  /// Captures frame texture as a photo.
+  /// Get original frame texture in the completion closure.
+  /// To get filtered texture, use `addCompletedHandler(_:)` method of `BBMetalBaseFilter`, check whether the filtered texture is camera photo.
+  /// This method is much faster than `takePhoto()` method.
+  /// - Parameter completion: a closure to call after capturing. If success, get original frame texture. If failure, get error.
+  public func capturePhoto(completion: BBMetalFilterCompletion? = nil) {
+    lock.wait()
+    _needPhoto = true
+    _capturePhotoCompletion = completion
+    lock.signal()
+  }
+
+  /// Takes a photo.
+  /// Before calling this method, set `canTakePhoto` property to true and `photoDelegate` property to nonnull.
+  /// Get original frame texture in `camera(_:didOutput:)` method of `BBMetalCameraPhotoDelegate`.
+  /// To get filtered texture, use `capturePhoto(completion:)` method, or create new filter to process the original frame texture.
+  public func takePhoto(
+    flashMode: AVCaptureDevice.FlashMode = .off
+  ) {
+    lock.wait()
+    if let output = photoOutput, _photoDelegate != nil {
+      let currentSettings = AVCapturePhotoSettings(format: [
+        kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA
+      ])
+      if camera.hasFlash {
+        currentSettings.flashMode = flashMode
+      }
+      output.capturePhoto(with: currentSettings, delegate: self)
+    }
+    lock.signal()
+  }
+
+  /// Switches camera position (back to front, or front to back)
+  ///
+  /// - Returns: true if succeed, or false if fail
+  @discardableResult
+  public func switchCameraPosition() -> Bool {
+    lock.wait()
+    session.beginConfiguration()
+    defer {
+      session.commitConfiguration()
+      lock.signal()
+    }
+
+    var position: AVCaptureDevice.Position = .back
+    if camera.position == .back { position = .front }
+
+    guard let videoDevice = selectDevice(forPosition: position),
+      let videoDeviceInput = try? AVCaptureDeviceInput(device: videoDevice)
+    else { return false }
+
+    session.removeInput(videoInput)
+
+    guard session.canAddInput(videoDeviceInput) else {
+      session.addInput(videoInput)
+      return false
+    }
+    session.addInput(videoDeviceInput)
+    camera = videoDevice
+    videoInput = videoDeviceInput
+
+    guard let connection = videoOutput.connections.first,
+      connection.isVideoOrientationSupported
+    else { return false }
+    originalOrientation = connection.videoOrientation
+    connection.videoOrientation = .portrait
+
+    return true
+  }
+
+  @available(iOS 16, *)
+  public func setRelativeZoomFactor(_ relativeZoom: CGFloat) {
+    let absoluteZoom = relativeZoom / currentDeviceDisplayVideoZoomFactorMultiplier
+
+    self.setAbsoluteZoomFactor(absoluteZoom)
+  }
+
+  @available(iOS 16, *)
+  public func setAbsoluteZoomFactor(_ absoluteZoom: CGFloat) {
+    let clampedZoom = max(
+      camera.minAvailableVideoZoomFactor, min(absoluteZoom, camera.maxAvailableVideoZoomFactor))
+
+    self.configureCamera {
+      $0.videoZoomFactor = clampedZoom
+    }
+  }
+
+  /// Sets camera frame rate
+  ///
+  /// - Parameter frameRate: camera frame rate
+  /// - Returns: true if succeed, or false if fail
+  @discardableResult
+  public func setFrameRate(_ frameRate: Float64) -> Bool {
+    var success = false
+    lock.wait()
+    do {
+      try camera.lockForConfiguration()
+      var targetFormat: AVCaptureDevice.Format?
+      let dimensions = CMVideoFormatDescriptionGetDimensions(camera.activeFormat.formatDescription)
+      for format in camera.formats {
+        let newDimensions = CMVideoFormatDescriptionGetDimensions(format.formatDescription)
+        if dimensions.width == newDimensions.width,
+          dimensions.height == newDimensions.height
+        {
+          for range in format.videoSupportedFrameRateRanges {
+            if range.maxFrameRate >= frameRate,
+              range.minFrameRate <= frameRate
+            {
+              targetFormat = format
+              break
             }
-            output.capturePhoto(with: currentSettings, delegate: self)
+          }
+          if targetFormat != nil { break }
         }
-        lock.signal()
+      }
+      if let format = targetFormat {
+        camera.activeFormat = format
+        camera.activeVideoMaxFrameDuration = CMTime(value: 1, timescale: CMTimeScale(frameRate))
+        camera.activeVideoMinFrameDuration = CMTime(value: 1, timescale: CMTimeScale(frameRate))
+        success = true
+      } else {
+        print("Can not find valid format for camera frame rate \(frameRate)")
+      }
+      camera.unlockForConfiguration()
+    } catch {
+      print("Error for camera lockForConfiguration: \(error)")
     }
-    
-    /// Switches camera position (back to front, or front to back)
-    ///
-    /// - Returns: true if succeed, or false if fail
-    @discardableResult
-    public func switchCameraPosition() -> Bool {
-        lock.wait()
-        session.beginConfiguration()
-        defer {
-            session.commitConfiguration()
-            lock.signal()
-        }
-        
-        var position: AVCaptureDevice.Position = .back
-        if camera.position == .back { position = .front }
-        
-        guard let videoDevice = selectDevice(forPosition: position),
-            let videoDeviceInput = try? AVCaptureDeviceInput(device: videoDevice) else { return false }
-        
-        session.removeInput(videoInput)
-        
-        guard session.canAddInput(videoDeviceInput) else {
-            session.addInput(videoInput)
-            return false
-        }
-        session.addInput(videoDeviceInput)
-        camera = videoDevice
-        videoInput = videoDeviceInput
-        
-        guard let connection = videoOutput.connections.first,
-            connection.isVideoOrientationSupported else { return false }
-        originalOrientation = connection.videoOrientation
-        connection.videoOrientation = .portrait
-        
-        return true
+    lock.signal()
+    return success
+  }
+
+  /// Configures camera.
+  /// Configure camera in the block, without calling `lockForConfiguration` and `unlockForConfiguration` methods.
+  ///
+  /// - Parameter block: closure configuring camera
+  public func configureCamera(_ block: (AVCaptureDevice) -> Void) {
+    lock.wait()
+    do {
+      try camera.lockForConfiguration()
+      block(camera)
+      camera.unlockForConfiguration()
+    } catch {
+      print("Error for camera lockForConfiguration: \(error)")
     }
-    
-    @available(iOS 16, *)
-    public func setRelativeZoomFactor(_ relativeZoom: CGFloat) {
-        let absoluteZoom = relativeZoom / currentDeviceDisplayVideoZoomFactorMultiplier
-        
-        self.setAbsoluteZoomFactor(absoluteZoom)
+    lock.signal()
+  }
+
+  /// Starts capturing
+  public func start() {
+    lock.wait()
+    addObservers(session: session)
+    session.startRunning()
+    if multitpleSessions, let session = audioSession {
+      addObservers(session: session)
+      session.startRunning()
     }
-    
-    @available(iOS 16, *)
-    public func setAbsoluteZoomFactor(_ absoluteZoom: CGFloat) {
-        let clampedZoom = max(camera.minAvailableVideoZoomFactor, min(absoluteZoom, camera.maxAvailableVideoZoomFactor))
-        
-        self.configureCamera {
-            $0.videoZoomFactor = clampedZoom
-        }
+    lock.signal()
+  }
+
+  /// Stops capturing
+  public func stop() {
+    lock.wait()
+    removeObservers(session: session)
+    session.stopRunning()
+    if multitpleSessions, let session = audioSession {
+      removeObservers(session: session)
+      session.stopRunning()
     }
-    
-    /// Sets camera frame rate
-    ///
-    /// - Parameter frameRate: camera frame rate
-    /// - Returns: true if succeed, or false if fail
-    @discardableResult
-    public func setFrameRate(_ frameRate: Float64) -> Bool {
-        var success = false
-        lock.wait()
-        do {
-            try camera.lockForConfiguration()
-            var targetFormat: AVCaptureDevice.Format?
-            let dimensions = CMVideoFormatDescriptionGetDimensions(camera.activeFormat.formatDescription)
-            for format in camera.formats {
-                let newDimensions = CMVideoFormatDescriptionGetDimensions(format.formatDescription)
-                if dimensions.width == newDimensions.width,
-                    dimensions.height == newDimensions.height {
-                    for range in format.videoSupportedFrameRateRanges {
-                        if range.maxFrameRate >= frameRate,
-                            range.minFrameRate <= frameRate {
-                            targetFormat = format
-                            break
-                        }
-                    }
-                    if targetFormat != nil { break }
-                }
-            }
-            if let format = targetFormat {
-                camera.activeFormat = format
-                camera.activeVideoMaxFrameDuration = CMTime(value: 1, timescale: CMTimeScale(frameRate))
-                camera.activeVideoMinFrameDuration = CMTime(value: 1, timescale: CMTimeScale(frameRate))
-                success = true
-            } else {
-                print("Can not find valid format for camera frame rate \(frameRate)")
-            }
-            camera.unlockForConfiguration()
-        } catch {
-            print("Error for camera lockForConfiguration: \(error)")
-        }
-        lock.signal()
-        return success
-    }
-    
-    /// Configures camera.
-    /// Configure camera in the block, without calling `lockForConfiguration` and `unlockForConfiguration` methods.
-    ///
-    /// - Parameter block: closure configuring camera
-    public func configureCamera(_ block: (AVCaptureDevice) -> Void) {
-        lock.wait()
-        do {
-            try camera.lockForConfiguration()
-            block(camera)
-            camera.unlockForConfiguration()
-        } catch {
-            print("Error for camera lockForConfiguration: \(error)")
-        }
-        lock.signal()
-    }
-    
-    /// Starts capturing
-    public func start() {
-        lock.wait()
-        addObservers(session: session)
-        session.startRunning()
-        if multitpleSessions, let session = audioSession {
-            addObservers(session: session)
-            session.startRunning()
-        }
-        lock.signal()
-    }
-    
-    /// Stops capturing
-    public func stop() {
-        lock.wait()
-        removeObservers(session: session)
-        session.stopRunning()
-        if multitpleSessions, let session = audioSession {
-            removeObservers(session: session)
-            session.stopRunning()
-        }
-        lock.signal()
-    }
-    
-    /// Resets benchmark record data
-    public func resetBenchmark() {
-        lock.wait()
-        capturedFrameCount = 0
-        totalCaptureFrameTime = 0
-        lock.signal()
-    }
+    lock.signal()
+  }
+
+  /// Resets benchmark record data
+  public func resetBenchmark() {
+    lock.wait()
+    capturedFrameCount = 0
+    totalCaptureFrameTime = 0
+    lock.signal()
+  }
 }
 
 extension BBMetalCamera: BBMetalImageSource {
-    @discardableResult
-    public func add<T: BBMetalImageConsumer>(consumer: T) -> T {
-        lock.wait()
-        _consumers.append(consumer)
-        lock.signal()
-        consumer.add(source: self)
-        return consumer
+  @discardableResult
+  public func add<T: BBMetalImageConsumer>(consumer: T) -> T {
+    lock.wait()
+    _consumers.append(consumer)
+    lock.signal()
+    consumer.add(source: self)
+    return consumer
+  }
+
+  public func add(consumer: BBMetalImageConsumer, at index: Int) {
+    lock.wait()
+    _consumers.insert(consumer, at: index)
+    lock.signal()
+    consumer.add(source: self)
+  }
+
+  public func remove(consumer: BBMetalImageConsumer) {
+    lock.wait()
+    if let index = _consumers.firstIndex(where: { $0 === consumer }) {
+      _consumers.remove(at: index)
+      lock.signal()
+      consumer.remove(source: self)
+    } else {
+      lock.signal()
     }
-    
-    public func add(consumer: BBMetalImageConsumer, at index: Int) {
-        lock.wait()
-        _consumers.insert(consumer, at: index)
-        lock.signal()
-        consumer.add(source: self)
+  }
+
+  public func removeAllConsumers() {
+    lock.wait()
+    let consumers = _consumers
+    _consumers.removeAll()
+    lock.signal()
+    for consumer in consumers {
+      consumer.remove(source: self)
     }
-    
-    public func remove(consumer: BBMetalImageConsumer) {
-        lock.wait()
-        if let index = _consumers.firstIndex(where: { $0 === consumer }) {
-            _consumers.remove(at: index)
-            lock.signal()
-            consumer.remove(source: self)
-        } else {
-            lock.signal()
-        }
-    }
-    
-    public func removeAllConsumers() {
-        lock.wait()
-        let consumers = _consumers
-        _consumers.removeAll()
-        lock.signal()
-        for consumer in consumers {
-            consumer.remove(source: self)
-        }
-    }
+  }
 }
 
-private extension BBMetalCamera {
-    func addObservers(session: AVCaptureSession) {
-        NotificationCenter.default.addObserver(self, selector: #selector(BBMetalCamera.sessionRuntimeErrorOccurred(notification:)), name: NSNotification.Name.AVCaptureSessionRuntimeError, object: session)
-        NotificationCenter.default.addObserver(self, selector: #selector(BBMetalCamera.sessionWasInterrupted(notification:)), name: NSNotification.Name.AVCaptureSessionWasInterrupted, object: session)
-        NotificationCenter.default.addObserver(self, selector: #selector(BBMetalCamera.sessionInterruptionEnded), name: NSNotification.Name.AVCaptureSessionInterruptionEnded, object: session)
+extension BBMetalCamera {
+  fileprivate func addObservers(session: AVCaptureSession) {
+    NotificationCenter.default.addObserver(
+      self, selector: #selector(BBMetalCamera.sessionRuntimeErrorOccurred(notification:)),
+      name: NSNotification.Name.AVCaptureSessionRuntimeError, object: session)
+    NotificationCenter.default.addObserver(
+      self, selector: #selector(BBMetalCamera.sessionWasInterrupted(notification:)),
+      name: NSNotification.Name.AVCaptureSessionWasInterrupted, object: session)
+    NotificationCenter.default.addObserver(
+      self, selector: #selector(BBMetalCamera.sessionInterruptionEnded),
+      name: NSNotification.Name.AVCaptureSessionInterruptionEnded, object: session)
+  }
+
+  fileprivate func removeObservers(session: AVCaptureSession) {
+    NotificationCenter.default.removeObserver(
+      self, name: NSNotification.Name.AVCaptureSessionRuntimeError, object: session)
+    NotificationCenter.default.removeObserver(
+      self, name: NSNotification.Name.AVCaptureSessionWasInterrupted, object: session)
+    NotificationCenter.default.removeObserver(
+      self, name: NSNotification.Name.AVCaptureSessionInterruptionEnded, object: session)
+  }
+
+  @objc fileprivate func sessionWasInterrupted(notification: Notification) {
+    guard
+      let userInfoValue = notification.userInfo?[AVCaptureSessionInterruptionReasonKey]
+        as AnyObject?,
+      let reasonIntegerValue = userInfoValue.integerValue,
+      let reason = AVCaptureSession.InterruptionReason(rawValue: reasonIntegerValue),
+      let session = notification.object as? AVCaptureSession
+    else {
+      return
     }
-    
-    func removeObservers(session: AVCaptureSession) {
-        NotificationCenter.default.removeObserver(self, name: NSNotification.Name.AVCaptureSessionRuntimeError, object: session)
-        NotificationCenter.default.removeObserver(self, name: NSNotification.Name.AVCaptureSessionWasInterrupted, object: session)
-        NotificationCenter.default.removeObserver(self, name: NSNotification.Name.AVCaptureSessionInterruptionEnded, object: session)
+    let isSeparateAudioSession = multitpleSessions && session == audioSession
+    sessionInterruptionHandler?(session, reason, isSeparateAudioSession)
+  }
+
+  @objc fileprivate func sessionInterruptionEnded(notification: Notification) {
+    // TODO: implement
+  }
+
+  @objc fileprivate func sessionRuntimeErrorOccurred(notification: Notification) {
+    guard let error = notification.userInfo?[AVCaptureSessionErrorKey] as? AVError,
+      let session = notification.object as? AVCaptureSession
+    else {
+      return
     }
-    
-    @objc func sessionWasInterrupted(notification: Notification) {
-        guard let userInfoValue = notification.userInfo?[AVCaptureSessionInterruptionReasonKey] as AnyObject?,
-              let reasonIntegerValue = userInfoValue.integerValue,
-              let reason = AVCaptureSession.InterruptionReason(rawValue: reasonIntegerValue),
-              let session = notification.object as? AVCaptureSession else {
-            return
-        }
-        let isSeparateAudioSession = multitpleSessions && session == audioSession
-        sessionInterruptionHandler?(session, reason, isSeparateAudioSession)
-    }
-    
-    @objc func sessionInterruptionEnded(notification: Notification) {
-        // TODO: implement
-    }
-    
-    @objc func sessionRuntimeErrorOccurred(notification: Notification) {
-        guard let error = notification.userInfo?[AVCaptureSessionErrorKey] as? AVError,
-              let session = notification.object as? AVCaptureSession else {
-            return
-        }
-        let isSeparateAudioSession = multitpleSessions && session == audioSession
-        sessionErrorHandler?(session, error, isSeparateAudioSession)
-    }
+    let isSeparateAudioSession = multitpleSessions && session == audioSession
+    sessionErrorHandler?(session, error, isSeparateAudioSession)
+  }
 }
 
-extension BBMetalCamera: AVCaptureVideoDataOutputSampleBufferDelegate, AVCaptureAudioDataOutputSampleBufferDelegate {
-    public func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
-        // Audio
-        if output is AVCaptureAudioDataOutput {
-            lock.wait()
-            let paused = _isPaused
-            let currentAudioConsumer = _audioConsumer
-            lock.signal()
-            if !paused,
-                let consumer = currentAudioConsumer {
-                consumer.newAudioSampleBufferAvailable(sampleBuffer)
-            }
-            return
-        }
-        
-        // Video
-        lock.wait()
-        let paused = _isPaused
-        let consumers = _consumers
-        let willTransmit = _willTransmitTexture
-        let preprocessVideo = _preprocessVideo
-        let cameraPosition = camera.position
-        
-        let isCameraPhoto = _needPhoto
-        if _needPhoto { _needPhoto = false }
-        
-        let capturePhotoCompletion = _capturePhotoCompletion
-        if _capturePhotoCompletion != nil { _capturePhotoCompletion = nil }
-        
-        let startTime = _benchmark ? CACurrentMediaTime() : 0
-        lock.signal()
-        
-        guard !paused, !consumers.isEmpty else { return }
-        
-        preprocessVideo?(sampleBuffer)
-        
-        guard let texture = texture(with: sampleBuffer) else {
-            if let completion = capturePhotoCompletion {
-                let error = NSError(domain: "BBMetalCameraErrorDomain", code: 0, userInfo: [NSLocalizedDescriptionKey: "Can not get Metal texture"])
-                let info = BBMetalFilterCompletionInfo(result: .failure(error),
-                                                       sampleTime: CMSampleBufferGetPresentationTimeStamp(sampleBuffer),
-                                                       cameraPosition: cameraPosition,
-                                                       isCameraPhoto: isCameraPhoto)
-                completion(info)
-            }
-            return
-        }
-        
-        let sampleTime = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
-        
-        if let completion = capturePhotoCompletion {
-            var result: Result<MTLTexture, Error>
-            let filter = BBMetalPassThroughFilter(createTexture: true)
-            if let metalTexture = filter.filteredTexture(with: texture.metalTexture) {
-                result = .success(metalTexture)
-            } else {
-                let error = NSError(domain: "BBMetalCameraErrorDomain", code: 0, userInfo: [NSLocalizedDescriptionKey: "Can not get Metal texture"])
-                result = .failure(error)
-            }
-            let info = BBMetalFilterCompletionInfo(result: result,
-                                                   sampleTime: sampleTime,
-                                                   cameraPosition: cameraPosition,
-                                                   isCameraPhoto: isCameraPhoto)
-            completion(info)
-        }
-        
-        willTransmit?(texture.metalTexture, sampleTime)
-        let output = BBMetalDefaultTexture(metalTexture: texture.metalTexture,
-                                           sampleTime: sampleTime,
-                                           cameraPosition: cameraPosition,
-                                           isCameraPhoto: isCameraPhoto,
-                                           cvMetalTexture: texture.cvMetalTexture)
-        for consumer in consumers { consumer.newTextureAvailable(output, from: self) }
-        
-        // Benchmark
-        if startTime != 0 {
-            lock.wait()
-            capturedFrameCount += 1
-            if capturedFrameCount > ignoreInitialFrameCount {
-                totalCaptureFrameTime += CACurrentMediaTime() - startTime
-            }
-            lock.signal()
-        }
+extension BBMetalCamera: AVCaptureVideoDataOutputSampleBufferDelegate,
+  AVCaptureAudioDataOutputSampleBufferDelegate
+{
+  public func captureOutput(
+    _ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer,
+    from connection: AVCaptureConnection
+  ) {
+    // Audio
+    if output is AVCaptureAudioDataOutput {
+      lock.wait()
+      let paused = _isPaused
+      let currentAudioConsumer = _audioConsumer
+      lock.signal()
+      if !paused,
+        let consumer = currentAudioConsumer
+      {
+        consumer.newAudioSampleBufferAvailable(sampleBuffer)
+      }
+      return
     }
-    
-    public func captureOutput(_ output: AVCaptureOutput, didDrop sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
-        print("Camera drops \(output is AVCaptureAudioDataOutput ? "audio" : "video") sample buffer")
+
+    // Video
+    lock.wait()
+    let paused = _isPaused
+    let consumers = _consumers
+    let willTransmit = _willTransmitTexture
+    let preprocessVideo = _preprocessVideo
+    let cameraPosition = camera.position
+
+    let isCameraPhoto = _needPhoto
+    if _needPhoto { _needPhoto = false }
+
+    let capturePhotoCompletion = _capturePhotoCompletion
+    if _capturePhotoCompletion != nil { _capturePhotoCompletion = nil }
+
+    let startTime = _benchmark ? CACurrentMediaTime() : 0
+    lock.signal()
+
+    guard !paused, !consumers.isEmpty else { return }
+
+    preprocessVideo?(sampleBuffer)
+
+    guard let texture = texture(with: sampleBuffer) else {
+      if let completion = capturePhotoCompletion {
+        let error = NSError(
+          domain: "BBMetalCameraErrorDomain", code: 0,
+          userInfo: [NSLocalizedDescriptionKey: "Can not get Metal texture"])
+        let info = BBMetalFilterCompletionInfo(
+          result: .failure(error),
+          sampleTime: CMSampleBufferGetPresentationTimeStamp(sampleBuffer),
+          cameraPosition: cameraPosition,
+          isCameraPhoto: isCameraPhoto)
+        completion(info)
+      }
+      return
     }
-    
-    private func texture(with sampleBuffer: CMSampleBuffer) -> BBMetalVideoTextureItem? {
-        guard let imageBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return nil }
-        let width = CVPixelBufferGetWidth(imageBuffer)
-        let height = CVPixelBufferGetHeight(imageBuffer)
-        
-        #if !targetEnvironment(simulator)
-        var cvMetalTextureOut: CVMetalTexture?
-        let result = CVMetalTextureCacheCreateTextureFromImage(kCFAllocatorDefault,
-                                                               textureCache,
-                                                               imageBuffer,
-                                                               nil,
-                                                               .bgra8Unorm, // camera ouput BGRA
-                                                               width,
-                                                               height,
-                                                               0,
-                                                               &cvMetalTextureOut)
-        if result == kCVReturnSuccess,
-            let cvMetalTexture = cvMetalTextureOut,
-            let texture = CVMetalTextureGetTexture(cvMetalTexture) {
-            return BBMetalVideoTextureItem(metalTexture: texture, cvMetalTexture: cvMetalTexture)
-        }
-        #endif
-        return nil
+
+    let sampleTime = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+
+    if let completion = capturePhotoCompletion {
+      var result: Result<MTLTexture, Error>
+      let filter = BBMetalPassThroughFilter(createTexture: true)
+      if let metalTexture = filter.filteredTexture(with: texture.metalTexture) {
+        result = .success(metalTexture)
+      } else {
+        let error = NSError(
+          domain: "BBMetalCameraErrorDomain", code: 0,
+          userInfo: [NSLocalizedDescriptionKey: "Can not get Metal texture"])
+        result = .failure(error)
+      }
+      let info = BBMetalFilterCompletionInfo(
+        result: result,
+        sampleTime: sampleTime,
+        cameraPosition: cameraPosition,
+        isCameraPhoto: isCameraPhoto)
+      completion(info)
     }
+
+    willTransmit?(texture.metalTexture, sampleTime)
+    let output = BBMetalDefaultTexture(
+      metalTexture: texture.metalTexture,
+      sampleTime: sampleTime,
+      cameraPosition: cameraPosition,
+      isCameraPhoto: isCameraPhoto,
+      cvMetalTexture: texture.cvMetalTexture)
+    for consumer in consumers { consumer.newTextureAvailable(output, from: self) }
+
+    // Benchmark
+    if startTime != 0 {
+      lock.wait()
+      capturedFrameCount += 1
+      if capturedFrameCount > ignoreInitialFrameCount {
+        totalCaptureFrameTime += CACurrentMediaTime() - startTime
+      }
+      lock.signal()
+    }
+  }
+
+  public func captureOutput(
+    _ output: AVCaptureOutput, didDrop sampleBuffer: CMSampleBuffer,
+    from connection: AVCaptureConnection
+  ) {
+    print("Camera drops \(output is AVCaptureAudioDataOutput ? "audio" : "video") sample buffer")
+  }
+
+  private func texture(with sampleBuffer: CMSampleBuffer) -> BBMetalVideoTextureItem? {
+    guard let imageBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return nil }
+    let width = CVPixelBufferGetWidth(imageBuffer)
+    let height = CVPixelBufferGetHeight(imageBuffer)
+
+    #if !targetEnvironment(simulator)
+      var cvMetalTextureOut: CVMetalTexture?
+      let result = CVMetalTextureCacheCreateTextureFromImage(
+        kCFAllocatorDefault,
+        textureCache,
+        imageBuffer,
+        nil,
+        .bgra8Unorm,  // camera ouput BGRA
+        width,
+        height,
+        0,
+        &cvMetalTextureOut)
+      if result == kCVReturnSuccess,
+        let cvMetalTexture = cvMetalTextureOut,
+        let texture = CVMetalTextureGetTexture(cvMetalTexture)
+      {
+        return BBMetalVideoTextureItem(metalTexture: texture, cvMetalTexture: cvMetalTexture)
+      }
+    #endif
+    return nil
+  }
 }
 
-extension BBMetalCamera: AVCapturePhotoCaptureDelegate {    
-    public func photoOutput(_ output: AVCapturePhotoOutput,
-                            didFinishProcessingPhoto photoSampleBuffer: CMSampleBuffer?,
-                            previewPhoto previewPhotoSampleBuffer: CMSampleBuffer?,
-                            resolvedSettings: AVCaptureResolvedPhotoSettings,
-                            bracketSettings: AVCaptureBracketedStillImageSettings?,
-                            error: Error?) {
-        
-        guard let delegate = photoDelegate else { return }
-        
-        if let error = error {
-            delegate.camera(self, didFail: error)
-            
-        } else if let sampleBuffer = photoSampleBuffer,
-            let texture = texture(with: sampleBuffer),
-            let rotatedTexture = rotatedTexture(with: texture.metalTexture, angle: 90) {
-            // Setting `videoOrientation` of `AVCaptureConnection` dose not work. So rotate texture here.
-            delegate.camera(self, didOutput: rotatedTexture)
-            
-        } else {
-            delegate.camera(self, didFail: NSError(domain: "BBMetalCamera.Photo", code: 0, userInfo: [NSLocalizedDescriptionKey : "Can not get Metal texture"]))
-        }
+extension BBMetalCamera: AVCapturePhotoCaptureDelegate {
+  public func photoOutput(
+    _ output: AVCapturePhotoOutput,
+    didFinishProcessingPhoto photoSampleBuffer: CMSampleBuffer?,
+    previewPhoto previewPhotoSampleBuffer: CMSampleBuffer?,
+    resolvedSettings: AVCaptureResolvedPhotoSettings,
+    bracketSettings: AVCaptureBracketedStillImageSettings?,
+    error: Error?
+  ) {
+
+    guard let delegate = photoDelegate else { return }
+
+    if let error = error {
+      delegate.camera(self, didFail: error)
+
+    } else if let sampleBuffer = photoSampleBuffer,
+      let texture = texture(with: sampleBuffer),
+      let rotatedTexture = rotatedTexture(with: texture.metalTexture, angle: 90)
+    {
+      // Setting `videoOrientation` of `AVCaptureConnection` dose not work. So rotate texture here.
+      delegate.camera(self, didOutput: rotatedTexture)
+
+    } else {
+      delegate.camera(
+        self,
+        didFail: NSError(
+          domain: "BBMetalCamera.Photo", code: 0,
+          userInfo: [NSLocalizedDescriptionKey: "Can not get Metal texture"]))
     }
-    
-    private func rotatedTexture(with inTexture: MTLTexture, angle: Float) -> MTLTexture? {
-        let source = BBMetalStaticImageSource(texture: inTexture)
-        let filter = BBMetalRotateFilter(angle: angle, fitSize: true)
-        source.add(consumer: filter).runSynchronously = true
-        source.transmitTexture()
-        return filter.outputTexture
-    }
+  }
+
+  private func rotatedTexture(with inTexture: MTLTexture, angle: Float) -> MTLTexture? {
+    let source = BBMetalStaticImageSource(texture: inTexture)
+    let filter = BBMetalRotateFilter(angle: angle, fitSize: true)
+    source.add(consumer: filter).runSynchronously = true
+    source.transmitTexture()
+    return filter.outputTexture
+  }
 }
 
 extension BBMetalCamera: AVCaptureMetadataOutputObjectsDelegate {
-    public func metadataOutput(_ output: AVCaptureMetadataOutput, didOutput metadataObjects: [AVMetadataObject], from connection: AVCaptureConnection) {
-        metadataObjectDelegate?.camera(self, didOutput: metadataObjects)
-    }
+  public func metadataOutput(
+    _ output: AVCaptureMetadataOutput, didOutput metadataObjects: [AVMetadataObject],
+    from connection: AVCaptureConnection
+  ) {
+    metadataObjectDelegate?.camera(self, didOutput: metadataObjects)
+  }
 }
