@@ -45,8 +45,21 @@ public enum BBMetalCameraError: Error {
   case cannotCreateMetalTextureCache
 }
 
+// TODO: Remove when device lookup issue fix is verified
+@_spi(Internals)
+public enum BBMetalCameraInternalError: Error {
+  case noVideoDeviceOldImpl
+  case noVideoDeviceNewImpl
+}
+
 /// Camera capturing image and providing Metal texture
 public class BBMetalCamera: NSObject {
+  // TODO: Remove when device lookup issue fix is verified
+  @_spi(Internals)
+  public func setInternalErrorHandler(_ handler: ((BBMetalCameraInternalError) -> Void)?) {
+    deviceLookup.internalErrorHandler = handler
+  }
+
   /// Image consumers
   public var consumers: [BBMetalImageConsumer] {
     lock.wait()
@@ -163,6 +176,7 @@ public class BBMetalCamera: NSObject {
   /// true means it's separate audio session
   public var sessionInterruptionHandler:
     ((AVCaptureSession, AVCaptureSession.InterruptionReason, Bool) -> Void)?
+
   /// true means it's separate audio session
   public var sessionErrorHandler: ((AVCaptureSession, AVError, Bool) -> Void)?
 
@@ -172,6 +186,7 @@ public class BBMetalCamera: NSObject {
 
   private let lock: DispatchSemaphore
 
+  private let deviceLookup: DeviceLookup = .init()
   private var session: AVCaptureSession!
   private var camera: AVCaptureDevice!
   private var videoInput: AVCaptureDeviceInput!
@@ -339,7 +354,7 @@ public class BBMetalCamera: NSObject {
 
     super.init()
 
-    guard let videoDevice = selectDevice(forPosition: position) else {
+    guard let videoDevice = deviceLookup.device(for: position) else {
       throw BBMetalCameraError.noVideoDevice
     }
 
@@ -396,38 +411,6 @@ public class BBMetalCamera: NSObject {
         throw BBMetalCameraError.cannotCreateMetalTextureCache
       }
     #endif
-  }
-
-  private func selectDevice(forPosition position: AVCaptureDevice.Position) -> AVCaptureDevice? {
-    guard #available(iOS 18, *) else {
-      return AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: position)
-    }
-
-    if position == .front {
-      return AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: position)
-    }
-
-    if let device = AVCaptureDevice.default(
-      .builtInTripleCamera,
-      for: .video,
-      position: position
-    ) {
-      return device
-    } else if let device = AVCaptureDevice.default(
-      .builtInDualWideCamera,
-      for: .video,
-      position: position
-    ) {
-      return device
-    } else if let device = AVCaptureDevice.default(
-      .builtInDualCamera,
-      for: .video,
-      position: position
-    ) {
-      return device
-    } else {
-      return AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: position)
-    }
   }
 
   @discardableResult
@@ -618,7 +601,8 @@ public class BBMetalCamera: NSObject {
     var position: AVCaptureDevice.Position = .back
     if camera.position == .back { position = .front }
 
-    guard let videoDevice = selectDevice(forPosition: position),
+    guard
+      let videoDevice = deviceLookup.device(for: position),
       let videoDeviceInput = try? AVCaptureDeviceInput(device: videoDevice)
     else { return false }
 
@@ -1020,5 +1004,95 @@ extension BBMetalCamera: AVCaptureMetadataOutputObjectsDelegate {
     from connection: AVCaptureConnection
   ) {
     metadataObjectDelegate?.camera(self, didOutput: metadataObjects)
+  }
+}
+
+extension BBMetalCamera {
+  class DeviceLookup {
+    private let session: AVCaptureDevice.DiscoverySession
+    private let deviceTypes: [AVCaptureDevice.DeviceType]
+
+    // TODO: Remove when device lookup issue fix is verified
+    var internalErrorHandler: ((BBMetalCameraInternalError) -> Void)?
+
+    init() {
+      var deviceTypes: [AVCaptureDevice.DeviceType] = []
+
+      if #available(iOS 13.0, *) {
+        deviceTypes.append(.builtInTripleCamera)
+        deviceTypes.append(.builtInDualWideCamera)
+      }
+
+      deviceTypes.append(.builtInDualCamera)
+      deviceTypes.append(.builtInWideAngleCamera)
+
+      self.deviceTypes = deviceTypes
+      self.session = AVCaptureDevice.DiscoverySession(
+        deviceTypes: deviceTypes,
+        mediaType: .video,
+        position: .unspecified
+      )
+    }
+
+    func device(for position: AVCaptureDevice.Position) -> AVCaptureDevice? {
+      let oldDeviceImpl = _oldImplDevice(for: position)
+      let newDeviceImpl = _newImplDevice(for: position)
+
+      if oldDeviceImpl == nil {
+        internalErrorHandler?(.noVideoDeviceOldImpl)
+      }
+
+      if newDeviceImpl == nil {
+        internalErrorHandler?(.noVideoDeviceNewImpl)
+      }
+
+      return oldDeviceImpl ?? newDeviceImpl
+    }
+
+    // TODO: Move code directly to `device(for:)` when device lookup issue fix is verified
+    private func _newImplDevice(for position: AVCaptureDevice.Position) -> AVCaptureDevice? {
+      let candidates = session.devices
+        .filter({ $0.position == position })
+        .sorted(by: {
+          let lhsIdx = deviceTypes.firstIndex(of: $0.deviceType) ?? 0
+          let rhsIdx = deviceTypes.firstIndex(of: $1.deviceType) ?? 0
+          return lhsIdx < rhsIdx
+        })
+
+      return candidates.first
+    }
+
+    // TODO: Remove when device lookup issue fix is verified
+    private func _oldImplDevice(for position: AVCaptureDevice.Position) -> AVCaptureDevice? {
+      guard #available(iOS 18, *) else {
+        return AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: position)
+      }
+
+      if position == .front {
+        return AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: position)
+      }
+
+      if let device = AVCaptureDevice.default(
+        .builtInTripleCamera,
+        for: .video,
+        position: position
+      ) {
+        return device
+      } else if let device = AVCaptureDevice.default(
+        .builtInDualWideCamera,
+        for: .video,
+        position: position
+      ) {
+        return device
+      } else if let device = AVCaptureDevice.default(
+        .builtInDualCamera,
+        for: .video,
+        position: position
+      ) {
+        return device
+      } else {
+        return AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: position)
+      }
+    }
   }
 }
