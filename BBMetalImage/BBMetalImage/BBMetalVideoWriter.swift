@@ -134,7 +134,8 @@ public class BBMetalVideoWriter {
     public func start(startHandler: BBMetalVideoWriterStart? = nil, progress: BBMetalVideoWriterProgress? = nil) -> Error? {
         lock.wait()
         defer { lock.signal() }
-        
+
+        self.previousRecordingFrameTime = nil
         self.startHandler = startHandler
         self.progress = progress
         
