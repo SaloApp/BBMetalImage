@@ -32,6 +32,8 @@ public class BBMetalVideoWriter {
     public let fileType: AVFileType
     /// Video settings
     public let outputSettings: [String : Any]
+
+    public var videoDidAppendFrameHandler: ((CVPixelBuffer, TimeInterval) -> Void)?
     
     private var computePipeline: MTLComputePipelineState!
     private var outputTexture: MTLTexture!
@@ -42,6 +44,7 @@ public class BBMetalVideoWriter {
     private var videoInput: AVAssetWriterInput!
     private var videoPixelBufferInput: AVAssetWriterInputPixelBufferAdaptor!
     private var videoPixelBuffer: CVPixelBuffer!
+    private var previousRecordingFrameTime: CMTime?
     
     /// Whether the video contains audio track (true by default)
     public var hasAudioTrack: Bool {
@@ -131,7 +134,8 @@ public class BBMetalVideoWriter {
     public func start(startHandler: BBMetalVideoWriterStart? = nil, progress: BBMetalVideoWriterProgress? = nil) -> Error? {
         lock.wait()
         defer { lock.signal() }
-        
+
+        self.previousRecordingFrameTime = nil
         self.startHandler = startHandler
         self.progress = progress
         
@@ -349,6 +353,15 @@ extension BBMetalVideoWriter: BBMetalImageConsumer {
         outputTexture.getBytes(baseAddress, bytesPerRow: bytesPerRow, from: region, mipmapLevel: 0)
         
         result = videoPixelBufferInput.append(videoPixelBuffer, withPresentationTime: sampleTime)
+
+        if let previousRecordingFrameTime {
+            let dt = CMTimeSubtract(sampleTime, previousRecordingFrameTime)
+            let ms = CMTimeConvertScale(dt, timescale: 1000, method: .default).value
+            
+            videoDidAppendFrameHandler?(videoPixelBuffer, TimeInterval(ms))
+        }
+        
+        previousRecordingFrameTime = sampleTime
         
         CVPixelBufferUnlockBaseAddress(videoPixelBuffer, [])
     }
