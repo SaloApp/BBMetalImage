@@ -104,7 +104,7 @@ public class BBMetalVideoWriter {
         self.outputSettings = outputSettings
         
         let library = try! BBMetalDevice.sharedDevice.makeDefaultLibrary(bundle: Bundle.module)
-        let kernelFunction = library.makeFunction(name: "passThroughKernel")!
+        let kernelFunction = library.makeFunction(name: "flipKernel")!
         computePipeline = try! BBMetalDevice.sharedDevice.makeComputePipelineState(function: kernelFunction)
         
         let descriptor = MTLTextureDescriptor()
@@ -225,6 +225,7 @@ public class BBMetalVideoWriter {
         settings[AVVideoHeightKey] = frameSize.height
         videoInput = AVAssetWriterInput(mediaType: .video, outputSettings: settings)
         videoInput.expectsMediaDataInRealTime = _expectsMediaDataInRealTime
+        
         if !writer.canAdd(videoInput) {
             print("Asset writer can not add video input")
             return false
@@ -323,6 +324,24 @@ extension BBMetalVideoWriter: BBMetalImageConsumer {
         encoder.setComputePipelineState(computePipeline)
         encoder.setTexture(outputTexture, index: 0)
         encoder.setTexture(texture.metalTexture, index: 1)
+        
+        var horizontal: Bool = (texture.cameraPosition == .front)
+        var vertical: Bool = false
+
+        let horizontalBuffer = BBMetalDevice.sharedDevice.makeBuffer(
+            bytes: &horizontal,
+            length: MemoryLayout<Bool>.size,
+            options: []
+        )
+        let verticalBuffer = BBMetalDevice.sharedDevice.makeBuffer(
+            bytes: &vertical,
+            length: MemoryLayout<Bool>.size,
+            options: []
+        )
+        
+        encoder.setBuffer(horizontalBuffer, offset: 0, index: 0)
+        encoder.setBuffer(verticalBuffer, offset: 0, index: 1)
+        
         encoder.dispatchThreadgroups(threadgroupCount, threadsPerThreadgroup: threadgroupSize)
         encoder.endEncoding()
         
