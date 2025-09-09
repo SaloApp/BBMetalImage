@@ -194,9 +194,9 @@ public class BBMetalCamera: NSObject {
   private var videoOutputQueue: DispatchQueue!
 
   private let multitpleSessions: Bool
-  private var audioSession: AVCaptureSession!
-  private var audioInput: AVCaptureDeviceInput!
-  private var audioOutput: AVCaptureAudioDataOutput!
+  private var audioSession: AVCaptureSession?
+  private var audioInput: AVCaptureDeviceInput?
+  private var audioOutput: AVCaptureAudioDataOutput?
   private var audioOutputQueue: DispatchQueue!
 
   /// Audio consumer processing audio sample buffer.
@@ -428,7 +428,7 @@ public class BBMetalCamera: NSObject {
     defer {
       session.commitConfiguration()
       if multitpleSessions, self.session.isRunning {
-        audioSession.startRunning()
+        audioSession?.startRunning()
       }
     }
 
@@ -464,13 +464,13 @@ public class BBMetalCamera: NSObject {
   }
 
   private func _removeAudioInputAndOutput() {
-    let session: AVCaptureSession = multitpleSessions ? audioSession : self.session
+    let session: AVCaptureSession? = multitpleSessions ? audioSession : self.session
     if let input = audioInput {
-      session.removeInput(input)
+      session?.removeInput(input)
       audioInput = nil
     }
     if let output = audioOutput {
-      session.removeOutput(output)
+      session?.removeOutput(output)
       audioOutput = nil
     }
     if audioOutputQueue != nil {
@@ -556,7 +556,7 @@ public class BBMetalCamera: NSObject {
 
   /// Captures frame texture as a photo.
   /// Get original frame texture in the completion closure.
-  /// To get filtered texture, use `addCompletedHandler(_:)` method of `BBMetalBaseFilter`, check whether the filtered texture is camera photo.
+  /// To get filtered texture, use `addCompletedHandler(_:) ` method of `BBMetalBaseFilter`, check whether the filtered texture is camera photo.
   /// This method is much faster than `takePhoto()` method.
   /// - Parameter completion: a closure to call after capturing. If success, get original frame texture. If failure, get error.
   public func capturePhoto(completion: BBMetalFilterCompletion? = nil) {
