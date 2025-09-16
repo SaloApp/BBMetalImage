@@ -20,12 +20,13 @@ public enum BBMetalVideoWriterProgressType {
 public enum BBMetalVideoWriterError: Error {
     case startCalledBeforePreviousWriteFinished
     case finishCaledButNoWritingInProgress
+	case urlIsNIL
 }
 
 /// Video writer writing video file
 public class BBMetalVideoWriter {
     /// URL of video file
-    public let url: URL
+    private var url: URL?
     /// Video frame size
     public let frameSize: BBMetalIntSize
     /// Video file type
@@ -93,12 +94,10 @@ public class BBMetalVideoWriter {
     }
     
     public init(
-        url: URL,
         frameSize: BBMetalIntSize,
         fileType: AVFileType = .mp4,
         outputSettings: [String : Any] = [AVVideoCodecKey : AVVideoCodecType.h264]
-    ) { 
-        self.url = url
+    ) {
         self.frameSize = frameSize
         self.fileType = fileType
         self.outputSettings = outputSettings
@@ -131,10 +130,15 @@ public class BBMetalVideoWriter {
     /// - Returns:
     ///   - Error if something goes wrong
     @discardableResult
-    public func start(startHandler: BBMetalVideoWriterStart? = nil, progress: BBMetalVideoWriterProgress? = nil) -> Error? {
+	public func start(
+		url: URL,
+		startHandler: BBMetalVideoWriterStart? = nil,
+		progress: BBMetalVideoWriterProgress? = nil
+	) -> Error? {
         lock.wait()
         defer { lock.signal() }
 
+		self.url = url
         self.previousRecordingFrameTime = nil
         self.startHandler = startHandler
         self.progress = progress
@@ -162,7 +166,7 @@ public class BBMetalVideoWriter {
     /// Finishes writing video file
     ///
     /// - Parameter completion: a closure to call after writing video file
-    public func finish(completion: ((Error?) -> Void)?) {
+    public func finish(completion: ((Result<URL, Error>) -> Void)?) {
         lock.wait()
         defer { lock.signal() }
         if let videoInput = self.videoInput,
@@ -187,11 +191,17 @@ public class BBMetalVideoWriter {
                 self.lock.signal()
                 */
                 NotificationCenter.default.post(name: NSNotification.Name(name), object: object, userInfo: nil)
-                completion?(writer.error)
+				if let error = writer.error {
+					completion?(.failure(error))
+				} else if let url = self.url {
+					completion?(.success(url))
+				} else {
+					completion?(.failure(BBMetalVideoWriterError.urlIsNIL))
+				}
             }
         } else {
             print("Should not call \(#function) while video writer is not writing")
-            completion?(BBMetalVideoWriterError.finishCaledButNoWritingInProgress)
+			completion?(.failure(BBMetalVideoWriterError.finishCaledButNoWritingInProgress))
         }
     }
     
@@ -214,6 +224,8 @@ public class BBMetalVideoWriter {
     }
     
     private func prepareAssetWriter() -> Bool {
+		guard let url else { return false }
+		
         writer = try? AVAssetWriter(url: url, fileType: fileType)
         if writer == nil {
             print("Can not create asset writer")
