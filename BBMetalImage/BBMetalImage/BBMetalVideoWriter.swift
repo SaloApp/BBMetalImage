@@ -169,6 +169,7 @@ public class BBMetalVideoWriter {
     public func finish(completion: ((Result<URL, Error>) -> Void)?) {
         lock.wait()
         defer { lock.signal() }
+		
         if let videoInput = self.videoInput,
             let writer = self.writer,
             writer.status == .writing {
@@ -176,32 +177,22 @@ public class BBMetalVideoWriter {
             if let audioInput = self.audioInput {
                 audioInput.markAsFinished()
             }
-            let name = "com.Kaibo.BBMetalImage.VideoWriter.Finish"
-            let object = NSObject()
-            NotificationCenter.default.addObserver(self, selector: #selector(finishWritingNotification(_:)), name: NSNotification.Name(name), object: object)
-            writer.finishWriting {
-                // The comment code below leads to memory leak even using [weak self].
-                // Using [unowned self] solves the memory leak, but not safe.
-                // So use notification here.
-                /*
-                [weak self] in
-                guard let self = self else { return }
-                self.lock.wait()
-                self.reset()
-                self.lock.signal()
-                */
-                NotificationCenter.default.post(name: NSNotification.Name(name), object: object, userInfo: nil)
+			
+            writer.finishWriting { [weak self] in
 				if let error = writer.error {
 					completion?(.failure(error))
-				} else if let url = self.url {
+				} else if let url = self?.url {
 					completion?(.success(url))
 				} else {
 					completion?(.failure(BBMetalVideoWriterError.urlIsNIL))
 				}
+				
+				self?.reset()
             }
         } else {
             print("Should not call \(#function) while video writer is not writing")
 			completion?(.failure(BBMetalVideoWriterError.finishCaledButNoWritingInProgress))
+			self.reset()
         }
     }
     
@@ -272,13 +263,6 @@ public class BBMetalVideoWriter {
         audioInput = nil
         startHandler = nil
         progress = nil
-    }
-    
-    @objc private func finishWritingNotification(_ notification: Notification) {
-        lock.wait()
-        reset()
-        NotificationCenter.default.removeObserver(self, name: notification.name, object: notification.object)
-        lock.signal()
     }
 }
 
