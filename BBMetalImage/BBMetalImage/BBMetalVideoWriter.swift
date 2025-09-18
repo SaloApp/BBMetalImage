@@ -103,7 +103,7 @@ public class BBMetalVideoWriter {
         self.outputSettings = outputSettings
         
         let library = try! BBMetalDevice.sharedDevice.makeDefaultLibrary(bundle: Bundle.module)
-        let kernelFunction = library.makeFunction(name: "flipKernel")!
+        let kernelFunction = library.makeFunction(name: "yopeVideoWriterKernel")!
         computePipeline = try! BBMetalDevice.sharedDevice.makeComputePipelineState(function: kernelFunction)
         
         let descriptor = MTLTextureDescriptor()
