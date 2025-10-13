@@ -50,6 +50,7 @@ public enum BBMetalCameraError: Error {
 public enum BBMetalCameraInternalError: Error {
   case noVideoDeviceOldImpl
   case noVideoDeviceNewImpl
+	case nonErrorCaptureDevicesLog([String])
 }
 
 /// Camera capturing image and providing Metal texture
@@ -334,11 +335,34 @@ public class BBMetalCamera: NSObject {
   ///   - position: camera position
   ///   - multitpleSessions: whether to use independent video session and audio session (false by default). Switching camera position while recording leads to the video and audio out of sync.
   /// Set true if we allow the user to switch camera position while recording.
+  public convenience init(
+    captureSession: AVCaptureSession = .init(),
+    sessionPreset: AVCaptureSession.Preset = .high,
+    position: AVCaptureDevice.Position = .back,
+    multitpleSessions: Bool = false,
+  ) throws {
+    try self.init(
+      captureSession: captureSession,
+      sessionPreset: sessionPreset,
+      position: position,
+      multitpleSessions: multitpleSessions,
+      internalErrorHandler: nil
+    )
+  }
+
+  /// Creates a camera
+  /// - Parameters:
+  ///   - sessionPreset: a constant value indicating the quality level or bit rate of the output
+  ///   - position: camera position
+  ///   - multitpleSessions: whether to use independent video session and audio session (false by default). Switching camera position while recording leads to the video and audio out of sync.
+  /// Set true if we allow the user to switch camera position while recording.
+  @_spi(Internals)
   public init(
     captureSession: AVCaptureSession = .init(),
     sessionPreset: AVCaptureSession.Preset = .high,
     position: AVCaptureDevice.Position = .back,
-    multitpleSessions: Bool = false
+    multitpleSessions: Bool = false,
+    internalErrorHandler: ((BBMetalCameraInternalError) -> Void)?
   ) throws {
     _consumers = []
     _canTakePhoto = false
@@ -353,6 +377,12 @@ public class BBMetalCamera: NSObject {
     lock = DispatchSemaphore(value: 1)
 
     super.init()
+    setInternalErrorHandler(internalErrorHandler)
+
+    let devices = deviceLookup.session.devices
+    internalErrorHandler?(.nonErrorCaptureDevicesLog(devices.map { device in
+      device.deviceType.rawValue
+    }))
 
     guard let videoDevice = deviceLookup.device(for: position) else {
       throw BBMetalCameraError.noVideoDevice
@@ -1009,7 +1039,8 @@ extension BBMetalCamera: AVCaptureMetadataOutputObjectsDelegate {
 
 extension BBMetalCamera {
   class DeviceLookup {
-    private let session: AVCaptureDevice.DiscoverySession
+    let session: AVCaptureDevice.DiscoverySession
+
     private let deviceTypes: [AVCaptureDevice.DeviceType]
 
     // TODO: Remove when device lookup issue fix is verified
