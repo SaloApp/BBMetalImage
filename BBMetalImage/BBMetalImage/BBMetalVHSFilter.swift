@@ -58,3 +58,10 @@ public class BBMetalVHSFilter: BBMetalBaseFilter {
 		encoder.setBytes(&t, length: MemoryLayout<Float>.size, index: 1)
 	}
 }
+
+
+
+
+
+
+
