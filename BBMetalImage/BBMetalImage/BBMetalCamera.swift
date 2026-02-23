@@ -413,6 +413,7 @@ public class BBMetalCamera: NSObject {
     videoDataOutput.videoSettings = [
       kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA
     ]
+    videoDataOutput.alwaysDiscardsLateVideoFrames = true
     videoOutputQueue = DispatchQueue(label: "com.Kaibo.BBMetalImage.Camera.videoOutput")
     videoDataOutput.setSampleBufferDelegate(self, queue: videoOutputQueue)
     if !session.canAddOutput(videoDataOutput) {
