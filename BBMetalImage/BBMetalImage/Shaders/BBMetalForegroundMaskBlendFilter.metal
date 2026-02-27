@@ -35,10 +35,18 @@ kernel void foregroundMaskBlendKernel(
 	const float rightMask = clamp(inputTexture2.sample(quadSampler, maskUV + float2(maskTexel.x, 0.0)).r, 0.0, 1.0);
 	const float topMask = clamp(inputTexture2.sample(quadSampler, maskUV + float2(0.0, -maskTexel.y)).r, 0.0, 1.0);
 	const float bottomMask = clamp(inputTexture2.sample(quadSampler, maskUV + float2(0.0, maskTexel.y)).r, 0.0, 1.0);
-	const float smoothedMask = (centerMask * 4.0 + leftMask + rightMask + topMask + bottomMask) / 8.0;
-	const float maskThresholdLow = bool(*isBackCamera) ? 0.62 : 0.5;
-	const float maskThresholdHigh = bool(*isBackCamera) ? 0.94 : 0.9;
-	const float maskGamma = bool(*isBackCamera) ? 2.0 : 1.7;
+	const float topLeftMask = clamp(inputTexture2.sample(quadSampler, maskUV + float2(-maskTexel.x, -maskTexel.y)).r, 0.0, 1.0);
+	const float topRightMask = clamp(inputTexture2.sample(quadSampler, maskUV + float2(maskTexel.x, -maskTexel.y)).r, 0.0, 1.0);
+	const float bottomLeftMask = clamp(inputTexture2.sample(quadSampler, maskUV + float2(-maskTexel.x, maskTexel.y)).r, 0.0, 1.0);
+	const float bottomRightMask = clamp(inputTexture2.sample(quadSampler, maskUV + float2(maskTexel.x, maskTexel.y)).r, 0.0, 1.0);
+	const float smoothedMask = (
+		centerMask * 4.0 +
+		(leftMask + rightMask + topMask + bottomMask) * 2.0 +
+		(topLeftMask + topRightMask + bottomLeftMask + bottomRightMask)
+	) / 16.0;
+	const float maskThresholdLow = bool(*isBackCamera) ? 0.48 : 0.42;
+	const float maskThresholdHigh = bool(*isBackCamera) ? 0.86 : 0.82;
+	const float maskGamma = bool(*isBackCamera) ? 1.45 : 1.35;
 	const float personMask = smoothstep(maskThresholdLow, maskThresholdHigh, pow(smoothedMask, maskGamma));
 	const float outAspect = width / height;
 	const float bgWidth = float(inputTexture3.get_width());
@@ -91,10 +99,18 @@ kernel void foregroundColorPopKernel(
 	const float rightMask = clamp(inputTexture2.sample(quadSampler, maskUV + float2(maskTexel.x, 0.0)).r, 0.0, 1.0);
 	const float topMask = clamp(inputTexture2.sample(quadSampler, maskUV + float2(0.0, -maskTexel.y)).r, 0.0, 1.0);
 	const float bottomMask = clamp(inputTexture2.sample(quadSampler, maskUV + float2(0.0, maskTexel.y)).r, 0.0, 1.0);
-	const float smoothedMask = (centerMask * 4.0 + leftMask + rightMask + topMask + bottomMask) / 8.0;
-	const float maskThresholdLow = bool(*isBackCamera) ? 0.62 : 0.5;
-	const float maskThresholdHigh = bool(*isBackCamera) ? 0.94 : 0.9;
-	const float maskGamma = bool(*isBackCamera) ? 2.0 : 1.7;
+	const float topLeftMask = clamp(inputTexture2.sample(quadSampler, maskUV + float2(-maskTexel.x, -maskTexel.y)).r, 0.0, 1.0);
+	const float topRightMask = clamp(inputTexture2.sample(quadSampler, maskUV + float2(maskTexel.x, -maskTexel.y)).r, 0.0, 1.0);
+	const float bottomLeftMask = clamp(inputTexture2.sample(quadSampler, maskUV + float2(-maskTexel.x, maskTexel.y)).r, 0.0, 1.0);
+	const float bottomRightMask = clamp(inputTexture2.sample(quadSampler, maskUV + float2(maskTexel.x, maskTexel.y)).r, 0.0, 1.0);
+	const float smoothedMask = (
+		centerMask * 4.0 +
+		(leftMask + rightMask + topMask + bottomMask) * 2.0 +
+		(topLeftMask + topRightMask + bottomLeftMask + bottomRightMask)
+	) / 16.0;
+	const float maskThresholdLow = bool(*isBackCamera) ? 0.48 : 0.42;
+	const float maskThresholdHigh = bool(*isBackCamera) ? 0.86 : 0.82;
+	const float maskGamma = bool(*isBackCamera) ? 1.45 : 1.35;
 	const float personMask = smoothstep(maskThresholdLow, maskThresholdHigh, pow(smoothedMask, maskGamma));
 
 	const half luminance = dot(base.rgb, half3(0.299h, 0.587h, 0.114h));
