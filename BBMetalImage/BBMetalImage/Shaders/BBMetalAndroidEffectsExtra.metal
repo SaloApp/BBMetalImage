@@ -1283,7 +1283,8 @@ kernel void androidZoom2Kernel(
 
 	float2 p = uv - 0.5;
 	float d = length(p);
-	float k = fract(*timeSec * 2.0) - 1.0;
+	// Keep ZM2 at maximum intensity without time-based animation.
+	const float k = -1.0;
 	d = d * (1.0 + k * d * d);
 	float2 n = length(p) > 0.0 ? normalize(p) : float2(0.0, 0.0);
 	float2 sampleUV = 0.5 + n * d;

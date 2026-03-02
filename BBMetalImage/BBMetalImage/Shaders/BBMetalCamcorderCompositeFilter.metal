@@ -48,7 +48,9 @@ kernel void camcorderCompositeKernel(
 		overlay = inputTexture3.sample(quadSampler, assetUV);
 	}
 
-	half3 color = mix(blurredBase.rgb, overlay.rgb, overlay.a);
+	const half backgroundVisibility = 0.8h;
+	const half3 darkenedBackground = blurredBase.rgb * backgroundVisibility;
+	half3 color = mix(darkenedBackground, overlay.rgb, overlay.a);
 
 	const float2 rawViewfinderMin = float2((*viewfinderRect).x, (*viewfinderRect).y);
 	const float2 rawViewfinderMax = float2((*viewfinderRect).z, (*viewfinderRect).w);
