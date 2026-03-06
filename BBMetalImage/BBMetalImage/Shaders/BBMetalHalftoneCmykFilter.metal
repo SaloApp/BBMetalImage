@@ -145,6 +145,22 @@ float3 applyInk(float3 paper, float3 inkColor, float cov) {
 	return paper * inkEffect;
 }
 
+float4 fourThreeCropSafeRectUV(float inputAspect) {
+	const float targetAspect = inputAspect >= 1.0 ? (4.0 / 3.0) : (3.0 / 4.0);
+	float2 origin = float2(0.0, 0.0);
+	float2 size = float2(1.0, 1.0);
+
+	if (inputAspect > targetAspect) {
+		size.x = targetAspect / inputAspect;
+		origin.x = (1.0 - size.x) * 0.5;
+	} else if (inputAspect < targetAspect) {
+		size.y = inputAspect / targetAspect;
+		origin.y = (1.0 - size.y) * 0.5;
+	}
+
+	return float4(origin, size);
+}
+
 kernel void halftoneCmykKernel(
 	texture2d<half, access::write> outputTexture [[texture(0)]],
 	texture2d<half, access::sample> inputTexture [[texture(1)]],
@@ -302,49 +318,58 @@ kernel void halftoneCmykKernel(
 	float3 original = originalSample.rgb;
 	color = mix(color, original, clamp(params.mixOriginal, 0.0, 1.0));
 
-	// Stamp frame: thicker paper border and perforation circles on all edges.
-	const float stampBorder = 0.055;
+	// Stamp frame should be drawn inside the same area that survives post-filter 4:3 crop.
 	const float2 pixel = uv * outSize;
-	const float borderPx = stampBorder * outSize.y;
-	const float2 innerMinPx = float2(borderPx, borderPx);
-	const float2 innerMaxPx = outSize - float2(borderPx, borderPx);
-	const bool isInsideInner = pixel.x >= innerMinPx.x && pixel.x <= innerMaxPx.x && pixel.y >= innerMinPx.y && pixel.y <= innerMaxPx.y;
-	if (!isInsideInner) {
-		float paperGrain = mix(noiseValues.g, noiseValues.b, 0.5);
-		float3 stampPaper = params.colorBack.rgb * mix(0.92, 1.02, paperGrain);
-		color = mix(color, stampPaper, 0.9);
-		opacity = 1.0;
+	const float4 safeRectUV = fourThreeCropSafeRectUV(imageAspectRatio);
+	const float2 safeMinPx = safeRectUV.xy * outSize;
+	const float2 safeSizePx = safeRectUV.zw * outSize;
+	const float2 safeMaxPx = safeMinPx + safeSizePx;
+	const bool isInsideSafeRect = pixel.x >= safeMinPx.x && pixel.x <= safeMaxPx.x && pixel.y >= safeMinPx.y && pixel.y <= safeMaxPx.y;
+
+	if (isInsideSafeRect) {
+		const float2 safePixel = pixel - safeMinPx;
+		const float stampBorder = 0.055;
+		const float borderPx = stampBorder * safeSizePx.y;
+		const float2 innerMinPx = float2(borderPx, borderPx);
+		const float2 innerMaxPx = safeSizePx - float2(borderPx, borderPx);
+		const bool isInsideInner = safePixel.x >= innerMinPx.x && safePixel.x <= innerMaxPx.x && safePixel.y >= innerMinPx.y && safePixel.y <= innerMaxPx.y;
+		if (!isInsideInner) {
+			float paperGrain = mix(noiseValues.g, noiseValues.b, 0.5);
+			float3 stampPaper = params.colorBack.rgb * mix(0.92, 1.02, paperGrain);
+			color = mix(color, stampPaper, 0.9);
+			opacity = 1.0;
+		}
+
+		float notchSpacing = 0.079 * safeSizePx.y;
+		float notchRadius = 0.024 * safeSizePx.y;
+		float notchSoftness = 0.0015 * safeSizePx.y;
+		float xPeriod = fmod(safePixel.x + 0.5 * notchSpacing, notchSpacing) - 0.5 * notchSpacing;
+		float yPeriod = fmod(safePixel.y + 0.5 * notchSpacing, notchSpacing) - 0.5 * notchSpacing;
+
+		float dTop = length(float2(xPeriod, safePixel.y));
+		float dBottom = length(float2(xPeriod, safeSizePx.y - safePixel.y));
+		float dLeft = length(float2(safePixel.x, yPeriod));
+		float dRight = length(float2(safeSizePx.x - safePixel.x, yPeriod));
+		float dMin = min(min(dTop, dBottom), min(dLeft, dRight));
+
+		float notchMask = 1.0 - smoothstep(notchRadius - notchSoftness, notchRadius + notchSoftness, dMin);
+		float edgeDistancePx = min(min(safePixel.x, safeSizePx.x - safePixel.x), min(safePixel.y, safeSizePx.y - safePixel.y));
+		float borderRegion = 1.0 - step(borderPx, edgeDistancePx);
+		notchMask *= borderRegion;
+		color = mix(color, float3(0.06), notchMask);
+
+		// Add a crisp outer stroke so stamp edges read sharp on all backgrounds.
+		float outerStroke = 1.0 - smoothstep(0.0, 1.5, edgeDistancePx);
+		color = mix(color, float3(0.04), outerStroke);
+
+		// Slight inner stroke to emphasize stamp framing.
+		float innerEdgeDistance = min(
+			min(abs(safePixel.x - innerMinPx.x), abs(safePixel.x - innerMaxPx.x)),
+			min(abs(safePixel.y - innerMinPx.y), abs(safePixel.y - innerMaxPx.y))
+		);
+		float innerStroke = (1.0 - smoothstep(0.0, 0.0015 * safeSizePx.y, innerEdgeDistance)) * step(borderPx, edgeDistancePx);
+		color = mix(color, color * 0.78, innerStroke);
 	}
-
-	const float notchSpacing = 0.055 * outSize.y;
-	const float notchRadius = 0.024 * outSize.y;
-	const float notchSoftness = 0.0015 * outSize.y;
-	float xPeriod = fmod(pixel.x + 0.5 * notchSpacing, notchSpacing) - 0.5 * notchSpacing;
-	float yPeriod = fmod(pixel.y + 0.5 * notchSpacing, notchSpacing) - 0.5 * notchSpacing;
-
-	float dTop = length(float2(xPeriod, pixel.y));
-	float dBottom = length(float2(xPeriod, outSize.y - pixel.y));
-	float dLeft = length(float2(pixel.x, yPeriod));
-	float dRight = length(float2(outSize.x - pixel.x, yPeriod));
-	float dMin = min(min(dTop, dBottom), min(dLeft, dRight));
-
-	float notchMask = 1.0 - smoothstep(notchRadius - notchSoftness, notchRadius + notchSoftness, dMin);
-	float edgeDistancePx = min(min(pixel.x, outSize.x - pixel.x), min(pixel.y, outSize.y - pixel.y));
-	float borderRegion = 1.0 - step(borderPx, edgeDistancePx);
-	notchMask *= borderRegion;
-	color = mix(color, float3(0.06), notchMask);
-
-	// Add a crisp outer stroke so stamp edges read sharp on all backgrounds.
-	float outerStroke = 1.0 - smoothstep(0.0, 1.5, edgeDistancePx);
-	color = mix(color, float3(0.04), outerStroke);
-
-	// Slight inner stroke to emphasize stamp framing.
-	float innerEdgeDistance = min(
-		min(abs(pixel.x - innerMinPx.x), abs(pixel.x - innerMaxPx.x)),
-		min(abs(pixel.y - innerMinPx.y), abs(pixel.y - innerMaxPx.y))
-	);
-	float innerStroke = (1.0 - smoothstep(0.0, 0.0015 * outSize.y, innerEdgeDistance)) * step(borderPx, edgeDistancePx);
-	color = mix(color, color * 0.78, innerStroke);
 
 	half4 outColor = half4(half(color.r), half(color.g), half(color.b), half(opacity));
 	outputTexture.write(outColor, gid);
