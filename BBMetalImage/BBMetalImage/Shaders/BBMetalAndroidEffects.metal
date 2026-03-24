@@ -334,7 +334,7 @@ float2 androidHudMapToSafe(float2 localUV, float2 safeOrigin, float2 safeSize) {
 	return safeOrigin + localUV * safeSize;
 }
 
-constant int kAndroidHudTextDVCAM[6] = { 68, 86, 32, 67, 65, 77 }; // DV CAM
+constant int kAndroidHudTextDVCAM[8] = { 89, 79, 80, 69, 32, 67, 65, 77 }; // YOPE CAM
 constant int kAndroidHudTextPLAY[4] = { 80, 76, 65, 89 }; // PLAY
 constant int kAndroidHudTextSEC60[5] = { 54, 48, 83, 69, 67 }; // 60SEC
 constant int kAndroidHudTextDVIN[5] = { 68, 86, 32, 73, 78 }; // DV IN
@@ -533,16 +533,6 @@ kernel void androidDvCamHudKernel(
 	float2 uv = (float2(gid) + 0.5) / imageSize;
 
 	float aspect = imageSize.x / max(imageSize.y, 1.0);
-	float2 safeOrigin = float2(0.0, 0.0);
-	float2 safeSize = float2(1.0, 1.0);
-	if (aspect < 1.0) {
-		safeOrigin.y = 0.5 * (1.0 - aspect);
-		safeSize.y = aspect;
-	} else {
-		float invAspect = 1.0 / aspect;
-		safeOrigin.x = 0.5 * (1.0 - invAspect);
-		safeSize.x = invAspect;
-	}
 
 	float2 squareMult = imageSize.x > imageSize.y ? float2(1.0, 1.0 / aspect) : float2(aspect, 1.0);
 	float2 squareXY = uv * squareMult;
@@ -598,11 +588,11 @@ kernel void androidDvCamHudKernel(
 	float2 dvCamOriginLocal = float2(0.03, 1.0 - charSizeLocal.y * 3.0 - 0.07);
 	float2 dvInOriginLocal = float2(0.03, dvCamOriginLocal.y + charSizeLocal.y + 0.010);
 
-	float2 timerOrigin = androidHudMapToSafe(timerOriginLocal, safeOrigin, safeSize);
-	float2 playOrigin = androidHudMapToSafe(playOriginLocal, safeOrigin, safeSize);
-	float2 secOrigin = androidHudMapToSafe(secOriginLocal, safeOrigin, safeSize);
-	float2 dvCamOrigin = androidHudMapToSafe(dvCamOriginLocal, safeOrigin, safeSize);
-	float2 dvInOrigin = androidHudMapToSafe(dvInOriginLocal, safeOrigin, safeSize);
+	float2 timerOrigin = timerOriginLocal;
+	float2 playOrigin = playOriginLocal;
+	float2 secOrigin = secOriginLocal;
+	float2 dvCamOrigin = dvCamOriginLocal;
+	float2 dvInOrigin = dvInOriginLocal;
 
 	float textMask = 0.0;
 	float shadowMask = 0.0;
@@ -635,12 +625,12 @@ kernel void androidDvCamHudKernel(
 	));
 
 	textMask = max(textMask, max(
-		androidHudDrawText(suv, dvCamOrigin, charSize, spacing, kAndroidHudTextDVCAM, 6),
-		androidHudDrawText(suvFlip, dvCamOrigin, charSize, spacing, kAndroidHudTextDVCAM, 6)
+		androidHudDrawText(suv, dvCamOrigin, charSize, spacing, kAndroidHudTextDVCAM, 8),
+		androidHudDrawText(suvFlip, dvCamOrigin, charSize, spacing, kAndroidHudTextDVCAM, 8)
 	));
 	shadowMask = max(shadowMask, max(
-		androidHudDrawText(suv + sh, dvCamOrigin, charSize, spacing, kAndroidHudTextDVCAM, 6),
-		androidHudDrawText(suvFlip + sh, dvCamOrigin, charSize, spacing, kAndroidHudTextDVCAM, 6)
+		androidHudDrawText(suv + sh, dvCamOrigin, charSize, spacing, kAndroidHudTextDVCAM, 8),
+		androidHudDrawText(suvFlip + sh, dvCamOrigin, charSize, spacing, kAndroidHudTextDVCAM, 8)
 	));
 
 	textMask = max(textMask, max(
@@ -666,8 +656,8 @@ kernel void androidDvCamHudKernel(
 		androidHudRect(suvFlip, secOrigin - float2(0.012, 0.008), float2(5.0 * charSize.x + 4.0 * spacing + 0.024, charSize.y + 0.016))
 	));
 	bgMask = max(bgMask, max(
-		androidHudRect(suv, dvCamOrigin - float2(0.012, 0.008), float2(6.0 * charSize.x + 5.0 * spacing + 0.024, charSize.y + 0.016)),
-		androidHudRect(suvFlip, dvCamOrigin - float2(0.012, 0.008), float2(6.0 * charSize.x + 5.0 * spacing + 0.024, charSize.y + 0.016))
+		androidHudRect(suv, dvCamOrigin - float2(0.012, 0.008), float2(8.0 * charSize.x + 7.0 * spacing + 0.024, charSize.y + 0.016)),
+		androidHudRect(suvFlip, dvCamOrigin - float2(0.012, 0.008), float2(8.0 * charSize.x + 7.0 * spacing + 0.024, charSize.y + 0.016))
 	));
 	bgMask = max(bgMask, max(
 		androidHudRect(suv, dvInOrigin - float2(0.012, 0.008), float2(5.0 * charSize.x + 4.0 * spacing + 0.024, charSize.y + 0.016)),
@@ -677,6 +667,92 @@ kernel void androidDvCamHudKernel(
 	c = mix(c, float3(0.02, 0.025, 0.03), clamp(bgMask, 0.0, 1.0) * 0.82);
 	c = mix(c, float3(0.0), clamp(shadowMask, 0.0, 1.0) * 0.72);
 	c = mix(c, float3(0.96, 0.99, 1.0), clamp(textMask, 0.0, 1.0));
+
+	outputTexture.write(half4(half3(androidHudClamp01(c)), 1.0), gid);
+}
+
+kernel void androidVhsDVCamTextHudKernel(
+	texture2d<half, access::write> outputTexture [[texture(0)]],
+	texture2d<half, access::sample> inputTexture [[texture(1)]],
+	constant float *timeSec [[buffer(0)]],
+	constant float *hudOpacityIn [[buffer(1)]],
+	constant float *counterMirrorIn [[buffer(2)]],
+	uint2 gid [[thread_position_in_grid]]
+) {
+	if (gid.x >= outputTexture.get_width() || gid.y >= outputTexture.get_height()) { return; }
+	constexpr sampler quadSampler(filter::linear, address::clamp_to_edge);
+	float2 imageSize = float2(outputTexture.get_width(), outputTexture.get_height());
+	float2 uv = (float2(gid) + 0.5) / imageSize;
+	float3 c = float3(inputTexture.sample(quadSampler, androidHudClamp01(uv)).rgb);
+
+	float aspect = imageSize.x / max(imageSize.y, 1.0);
+
+	int timeMs = int(max(*timeSec, 0.0) * 1000.0);
+	int hh = (timeMs / (60 * 60 * 1000)) % 100;
+	int mm = (timeMs % (60 * 60 * 1000)) / (60 * 1000);
+	int ss = ((timeMs % (60 * 60 * 1000)) % (60 * 1000)) / 1000;
+	int ff = (((timeMs % (60 * 60 * 1000)) % (60 * 1000)) % 1000) * 30 / 1000;
+
+	float2 suv = uv;
+	if (*counterMirrorIn > 0.5) {
+		suv.x = 1.0 - suv.x;
+	}
+	float2 charSizeLocal = float2(0.030, 0.051);
+	float spacingLocal = 0.0055;
+	float2 charSize = charSizeLocal;
+	float spacing = spacingLocal;
+	float2 sh = float2(1.0 / imageSize.x, 1.0 / imageSize.y);
+	float sideMargin = 0.030;
+
+	float textWidthTimerLocal = 11.0 * charSizeLocal.x + 10.0 * spacingLocal;
+	float2 timerOriginLocal = float2(1.0 - textWidthTimerLocal - sideMargin, 0.035);
+	float2 playOriginLocal = float2(timerOriginLocal.x - (4.0 * charSizeLocal.x + 3.0 * spacingLocal) - 0.014, timerOriginLocal.y);
+	float2 secOriginLocal = float2(1.0 - (5.0 * charSizeLocal.x + 4.0 * spacingLocal) - sideMargin, timerOriginLocal.y + charSizeLocal.y + 0.010);
+	float2 dvCamOriginLocal = float2(sideMargin, 1.0 - charSizeLocal.y * 3.0 - 0.012);
+	float2 dvInOriginLocal = float2(sideMargin, dvCamOriginLocal.y + charSizeLocal.y + 0.010);
+
+	float2 timerOrigin = timerOriginLocal;
+	float2 playOrigin = playOriginLocal;
+	float2 secOrigin = secOriginLocal;
+	float2 dvCamOrigin = dvCamOriginLocal;
+	float2 dvInOrigin = dvInOriginLocal;
+
+	float textMask = 0.0;
+	float shadowMask = 0.0;
+
+	textMask = max(textMask, androidHudDrawTimerHHMMSSFF(suv, timerOrigin, charSize, spacing, hh, mm, ss, ff));
+	shadowMask = max(shadowMask, androidHudDrawTimerHHMMSSFF(suv + sh, timerOrigin, charSize, spacing, hh, mm, ss, ff));
+
+	textMask = max(textMask, androidHudDrawText(suv, playOrigin, charSize, spacing, kAndroidHudTextPLAY, 4));
+	shadowMask = max(shadowMask, androidHudDrawText(suv + sh, playOrigin, charSize, spacing, kAndroidHudTextPLAY, 4));
+
+	textMask = max(textMask, androidHudDrawText(suv, secOrigin, charSize, spacing, kAndroidHudTextSEC60, 5));
+	shadowMask = max(shadowMask, androidHudDrawText(suv + sh, secOrigin, charSize, spacing, kAndroidHudTextSEC60, 5));
+
+	textMask = max(textMask, androidHudDrawText(suv, dvCamOrigin, charSize, spacing, kAndroidHudTextDVCAM, 8));
+	shadowMask = max(shadowMask, androidHudDrawText(suv + sh, dvCamOrigin, charSize, spacing, kAndroidHudTextDVCAM, 8));
+
+	textMask = max(textMask, androidHudDrawText(suv, dvInOrigin, charSize, spacing, kAndroidHudTextDVIN, 5));
+	shadowMask = max(shadowMask, androidHudDrawText(suv + sh, dvInOrigin, charSize, spacing, kAndroidHudTextDVIN, 5));
+
+	float textWidthTimer = 11.0 * charSize.x + 10.0 * spacing;
+	float bgMask = 0.0;
+	bgMask = max(bgMask, androidHudRect(suv, timerOrigin - float2(0.012, 0.008), float2(textWidthTimer + 0.024, charSize.y + 0.016)));
+	bgMask = max(bgMask, androidHudRect(suv, playOrigin - float2(0.012, 0.008), float2(4.0 * charSize.x + 3.0 * spacing + 0.024, charSize.y + 0.016)));
+	bgMask = max(bgMask, androidHudRect(suv, secOrigin - float2(0.012, 0.008), float2(5.0 * charSize.x + 4.0 * spacing + 0.024, charSize.y + 0.016)));
+	bgMask = max(bgMask, androidHudRect(suv, dvCamOrigin - float2(0.012, 0.008), float2(8.0 * charSize.x + 7.0 * spacing + 0.024, charSize.y + 0.016)));
+	bgMask = max(bgMask, androidHudRect(suv, dvInOrigin - float2(0.012, 0.008), float2(5.0 * charSize.x + 4.0 * spacing + 0.024, charSize.y + 0.016)));
+
+	float2 recOrigin = float2(sideMargin, 0.035);
+	float2 recP = (suv - recOrigin) * float2(aspect, 1.0);
+	float recDot = smoothstep(0.012, 0.010, length(recP));
+	float recBlink = step(0.5, fract(*timeSec * 2.0));
+
+	float hudOpacity = clamp(*hudOpacityIn, 0.0, 1.0);
+	c = mix(c, float3(0.02, 0.025, 0.03), clamp(bgMask, 0.0, 1.0) * 0.78 * hudOpacity);
+	c = mix(c, float3(0.0), clamp(shadowMask, 0.0, 1.0) * 0.68 * hudOpacity);
+	c = mix(c, float3(0.96, 0.99, 1.0), clamp(textMask, 0.0, 1.0) * hudOpacity);
+	c = mix(c, float3(1.0, 0.20, 0.10), recDot * recBlink * 0.9 * hudOpacity);
 
 	outputTexture.write(half4(half3(androidHudClamp01(c)), 1.0), gid);
 }

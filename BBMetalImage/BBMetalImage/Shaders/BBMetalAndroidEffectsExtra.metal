@@ -532,6 +532,77 @@ kernel void androidPolaroidKernel(
 	outputTexture.write(half4(half3(androidExtraClamp01(outColor.rgb)), 1.0), gid);
 }
 
+kernel void androidPolaroidPaperKernel(
+	texture2d<half, access::write> outputTexture [[texture(0)]],
+	texture2d<half, access::sample> inputTexture [[texture(1)]],
+	texture2d<half, access::sample> paperTexture [[texture(2)]],
+	constant float *timeSec [[buffer(0)]],
+	constant float *developMixIn [[buffer(1)]],
+	constant float *darkThresholdIn [[buffer(2)]],
+	constant float *darkSoftnessIn [[buffer(3)]],
+	constant float *paperOpacityIn [[buffer(4)]],
+	uint2 gid [[thread_position_in_grid]]
+) {
+	if (gid.x >= outputTexture.get_width() || gid.y >= outputTexture.get_height()) { return; }
+	constexpr sampler quadSampler(filter::linear, address::clamp_to_edge);
+	float2 resolution = float2(outputTexture.get_width(), outputTexture.get_height());
+	float2 uv = (float2(gid) + 0.5) / resolution;
+
+	// Aspect-fill paper texture into output space.
+	float outAspect = resolution.x / max(resolution.y, 1.0);
+	float paperAspect = float(paperTexture.get_width()) / max(float(paperTexture.get_height()), 1.0);
+	float2 paperUV = uv;
+	if (paperAspect > outAspect) {
+		float normalizedWidth = outAspect / max(paperAspect, 1e-6);
+		paperUV.x = (uv.x - 0.5) * normalizedWidth + 0.5;
+	} else if (paperAspect < outAspect) {
+		float normalizedHeight = paperAspect / max(outAspect, 1e-6);
+		paperUV.y = (uv.y - 0.5) * normalizedHeight + 0.5;
+	}
+	float3 paper = float3(paperTexture.sample(quadSampler, androidExtraClamp01(paperUV)).rgb);
+
+	// Camera scale-down in center (0.9) before aspect mapping.
+	const float cameraScale = 0.90;
+	float2 cameraCanvasUV = (uv - 0.5) / cameraScale + 0.5;
+	bool cameraInBounds = (
+		cameraCanvasUV.x >= 0.0 && cameraCanvasUV.x <= 1.0 &&
+		cameraCanvasUV.y >= 0.0 && cameraCanvasUV.y <= 1.0
+	);
+
+	// Camera aspect-fill in output space.
+	float cameraAspect = float(inputTexture.get_width()) / max(float(inputTexture.get_height()), 1.0);
+	float2 cameraUV = cameraCanvasUV;
+	if (cameraAspect > outAspect) {
+		float normalizedWidth = outAspect / max(cameraAspect, 1e-6);
+		cameraUV.x = (cameraCanvasUV.x - 0.5) * normalizedWidth + 0.5;
+	} else if (cameraAspect < outAspect) {
+		float normalizedHeight = cameraAspect / max(outAspect, 1e-6);
+		cameraUV.y = (cameraCanvasUV.y - 0.5) * normalizedHeight + 0.5;
+	}
+	float4 baseCamera = float4(inputTexture.sample(quadSampler, androidExtraClamp01(cameraUV)));
+	float4 developedCamera = androidPolaroidVhsColorCorrection(baseCamera, 0.3);
+	float developMix = clamp(*developMixIn, 0.0, 1.0);
+	float3 cameraColor = mix(baseCamera.rgb, developedCamera.rgb, developMix);
+
+	// Development appears through paper black pixels.
+	float paperLuma = dot(paper, float3(0.299, 0.587, 0.114));
+	float darkThreshold = clamp(*darkThresholdIn, 0.0, 1.0);
+	float darkSoftness = clamp(*darkSoftnessIn, 0.001, 0.5);
+	float blackMask = smoothstep(darkThreshold + darkSoftness, darkThreshold - darkSoftness, paperLuma);
+
+	float phase = androidExtraNoise(uv * resolution * 0.018 + float2(*timeSec * 0.09, *timeSec * 0.06));
+	float developPhase = mix(0.88, 1.08, phase);
+	float reveal = clamp(blackMask * developPhase * max(developMix, 0.15), 0.0, 1.0);
+	if (!cameraInBounds) {
+		reveal = 0.0;
+	}
+
+	float overlayStrength = clamp(*paperOpacityIn, 0.0, 1.0);
+	float3 outRgb = mix(paper, cameraColor, reveal * overlayStrength);
+
+	outputTexture.write(half4(half3(androidExtraClamp01(outRgb)), 1.0), gid);
+}
+
 // MARK: - Rave
 
 kernel void androidRaveKernel(
