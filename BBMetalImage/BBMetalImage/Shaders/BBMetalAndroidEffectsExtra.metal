@@ -74,6 +74,7 @@ kernel void androidCathodeKernel(
 	constexpr sampler quadSampler(filter::linear, address::clamp_to_edge);
 	float2 resolution = float2(outputTexture.get_width(), outputTexture.get_height());
 	float2 uv = (float2(gid) + 0.5) / resolution;
+	float outAspect = resolution.x / max(resolution.y, 1.0f);
 	float rnd = androidExtraRand(uv + fract(*timeSec));
 
 	float3 sumCol = float3(0.0);
@@ -541,28 +542,26 @@ kernel void androidPolaroidPaperKernel(
 	constant float *darkThresholdIn [[buffer(2)]],
 	constant float *darkSoftnessIn [[buffer(3)]],
 	constant float *paperOpacityIn [[buffer(4)]],
+	constant float *cameraScaleIn [[buffer(5)]],
 	uint2 gid [[thread_position_in_grid]]
 ) {
 	if (gid.x >= outputTexture.get_width() || gid.y >= outputTexture.get_height()) { return; }
 	constexpr sampler quadSampler(filter::linear, address::clamp_to_edge);
 	float2 resolution = float2(outputTexture.get_width(), outputTexture.get_height());
 	float2 uv = (float2(gid) + 0.5) / resolution;
+	float outAspect = resolution.x / max(resolution.y, 1.0f);
 
-	// Aspect-fill paper texture into output space.
-	float outAspect = resolution.x / max(resolution.y, 1.0);
-	float paperAspect = float(paperTexture.get_width()) / max(float(paperTexture.get_height()), 1.0);
+	// Simple paper mapping: horizontal fit (full width), preserve aspect.
+	float paperAspect = float(paperTexture.get_width()) / max(float(paperTexture.get_height()), 1.0f);
+	float fitHeight = min(1.0f, outAspect / max(paperAspect, 1e-6f));
 	float2 paperUV = uv;
-	if (paperAspect > outAspect) {
-		float normalizedWidth = outAspect / max(paperAspect, 1e-6);
-		paperUV.x = (uv.x - 0.5) * normalizedWidth + 0.5;
-	} else if (paperAspect < outAspect) {
-		float normalizedHeight = paperAspect / max(outAspect, 1e-6);
-		paperUV.y = (uv.y - 0.5) * normalizedHeight + 0.5;
-	}
-	float3 paper = float3(paperTexture.sample(quadSampler, androidExtraClamp01(paperUV)).rgb);
+	paperUV.y = (uv.y - 0.5f) / max(fitHeight, 1e-6f) + 0.5f;
+	bool paperInBounds = paperUV.y >= 0.0f && paperUV.y <= 1.0f;
+	float3 paperSample = float3(paperTexture.sample(quadSampler, androidExtraClamp01(paperUV)).rgb);
+	float3 paper = paperInBounds ? paperSample : float3(1.0f);
 
-	// Camera scale-down in center (0.9) before aspect mapping.
-	const float cameraScale = 0.90;
+	// Camera scale-down in center to leave a larger paper border.
+	float cameraScale = clamp(*cameraScaleIn, 0.6f, 1.2f);
 	float2 cameraCanvasUV = (uv - 0.5) / cameraScale + 0.5;
 	bool cameraInBounds = (
 		cameraCanvasUV.x >= 0.0 && cameraCanvasUV.x <= 1.0 &&
@@ -588,17 +587,15 @@ kernel void androidPolaroidPaperKernel(
 	float paperLuma = dot(paper, float3(0.299, 0.587, 0.114));
 	float darkThreshold = clamp(*darkThresholdIn, 0.0, 1.0);
 	float darkSoftness = clamp(*darkSoftnessIn, 0.001, 0.5);
-	float blackMask = smoothstep(darkThreshold + darkSoftness, darkThreshold - darkSoftness, paperLuma);
-
-	float phase = androidExtraNoise(uv * resolution * 0.018 + float2(*timeSec * 0.09, *timeSec * 0.06));
-	float developPhase = mix(0.88, 1.08, phase);
-	float reveal = clamp(blackMask * developPhase * max(developMix, 0.15), 0.0, 1.0);
-	if (!cameraInBounds) {
-		reveal = 0.0;
-	}
-
+	float darkMin = clamp(darkThreshold - darkSoftness, 0.0, 1.0);
+	float darkMax = clamp(darkThreshold + darkSoftness, 0.0, 1.0);
+	// Reveal camera through darker paper regions in a numerically stable way.
+	float blackMask = 1.0 - smoothstep(darkMin, darkMax, paperLuma);
 	float overlayStrength = clamp(*paperOpacityIn, 0.0, 1.0);
-	float3 outRgb = mix(paper, cameraColor, reveal * overlayStrength);
+	float reveal = cameraInBounds ? clamp(blackMask * overlayStrength, 0.0, 1.0) : 0.0;
+	// Use hard compositing so paper texture never overlays the revealed camera region.
+	float revealHard = step(0.5, reveal);
+	float3 outRgb = mix(paper, cameraColor, revealHard);
 
 	outputTexture.write(half4(half3(androidExtraClamp01(outRgb)), 1.0), gid);
 }

@@ -574,19 +574,22 @@ kernel void androidDvCamHudKernel(
 	float2 screenUV = (float2(gid) + 0.5) / imageSize;
 	float2 suv = screenUV;
 	float2 suvFlip = suv;
-	float2 charSizeLocal = float2(0.032, 0.054);
-	float spacingLocal = 0.0060;
+	float2 charSizeLocal = float2(0.015, 0.0255);
+	float spacingLocal = 0.00275;
 	float2 charSize = charSizeLocal;
 	float spacing = spacingLocal;
 	float textWidthTimer = 11.0 * charSize.x + 10.0 * spacing;
 	float2 sh = float2(1.0 / imageSize.x, 1.0 / imageSize.y);
+	float sideMargin = 0.050;
+	float topMargin = 0.150;
+	float bottomMargin = 0.115;
 
 	float textWidthTimerLocal = 11.0 * charSizeLocal.x + 10.0 * spacingLocal;
-	float2 timerOriginLocal = float2(1.0 - textWidthTimerLocal - 0.03, 0.06);
+	float2 timerOriginLocal = float2(1.0 - textWidthTimerLocal - sideMargin, topMargin);
 	float2 playOriginLocal = float2(timerOriginLocal.x - (4.0 * charSizeLocal.x + 3.0 * spacingLocal) - 0.014, timerOriginLocal.y);
-	float2 secOriginLocal = float2(1.0 - (5.0 * charSizeLocal.x + 4.0 * spacingLocal) - 0.03, timerOriginLocal.y + charSizeLocal.y + 0.010);
-	float2 dvCamOriginLocal = float2(0.03, 1.0 - charSizeLocal.y * 3.0 - 0.07);
-	float2 dvInOriginLocal = float2(0.03, dvCamOriginLocal.y + charSizeLocal.y + 0.010);
+	float2 secOriginLocal = float2(1.0 - (5.0 * charSizeLocal.x + 4.0 * spacingLocal) - sideMargin, timerOriginLocal.y + charSizeLocal.y + 0.010);
+	float2 dvCamOriginLocal = float2(sideMargin, 1.0 - charSizeLocal.y * 3.0 - bottomMargin);
+	float2 dvInOriginLocal = float2(sideMargin, dvCamOriginLocal.y + charSizeLocal.y + 0.010);
 
 	float2 timerOrigin = timerOriginLocal;
 	float2 playOrigin = playOriginLocal;
@@ -697,14 +700,14 @@ kernel void androidVhsDVCamTextHudKernel(
 	if (*counterMirrorIn > 0.5) {
 		suv.x = 1.0 - suv.x;
 	}
-	float2 charSizeLocal = float2(0.030, 0.051);
-	float spacingLocal = 0.0055;
+	float2 charSizeLocal = float2(0.015, 0.0255);
+	float spacingLocal = 0.00275;
 	float2 charSize = charSizeLocal;
 	float spacing = spacingLocal;
 	float2 sh = float2(1.0 / imageSize.x, 1.0 / imageSize.y);
 	float sideMargin = 0.050;
-	float topMargin = 0.070;
-	float bottomMargin = 0.065;
+	float topMargin = 0.150;
+	float bottomMargin = 0.115;
 
 	float textWidthTimerLocal = 11.0 * charSizeLocal.x + 10.0 * spacingLocal;
 	float2 timerOriginLocal = float2(1.0 - textWidthTimerLocal - sideMargin, topMargin);
@@ -745,16 +748,10 @@ kernel void androidVhsDVCamTextHudKernel(
 	bgMask = max(bgMask, androidHudRect(suv, dvCamOrigin - float2(0.012, 0.008), float2(8.0 * charSize.x + 7.0 * spacing + 0.024, charSize.y + 0.016)));
 	bgMask = max(bgMask, androidHudRect(suv, dvInOrigin - float2(0.012, 0.008), float2(5.0 * charSize.x + 4.0 * spacing + 0.024, charSize.y + 0.016)));
 
-	float2 recOrigin = float2(sideMargin, topMargin);
-	float2 recP = (suv - recOrigin) * float2(aspect, 1.0);
-	float recDot = smoothstep(0.012, 0.010, length(recP));
-	float recBlink = step(0.5, fract(*timeSec * 2.0));
-
 	float hudOpacity = clamp(*hudOpacityIn, 0.0, 1.0);
 	c = mix(c, float3(0.02, 0.025, 0.03), clamp(bgMask, 0.0, 1.0) * 0.78 * hudOpacity);
 	c = mix(c, float3(0.0), clamp(shadowMask, 0.0, 1.0) * 0.68 * hudOpacity);
 	c = mix(c, float3(0.96, 0.99, 1.0), clamp(textMask, 0.0, 1.0) * hudOpacity);
-	c = mix(c, float3(1.0, 0.20, 0.10), recDot * recBlink * 0.9 * hudOpacity);
 
 	outputTexture.write(half4(half3(androidHudClamp01(c)), 1.0), gid);
 }

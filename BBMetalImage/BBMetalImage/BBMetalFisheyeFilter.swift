@@ -28,7 +28,7 @@ public class BBMetalFisheyeFilter: BBMetalBaseFilter {
     public init(
         modifier: Float = 0.5,
         borderSoftness: Float = 0.18,
-        vignetteStrength: Float = 0.22
+        vignetteStrength: Float = 0.12
     ) {
         self.modifier = modifier
         self.borderSoftness = borderSoftness
