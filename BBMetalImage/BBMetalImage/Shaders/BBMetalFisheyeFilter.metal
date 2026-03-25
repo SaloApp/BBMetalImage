@@ -11,6 +11,7 @@ using namespace metal;
 
 struct FisheyeUniforms {
     float modifier;
+    float distortionMix;
     float borderSoftness;
     float vignetteStrength;
 };
@@ -45,9 +46,12 @@ kernel void fisheyeKernel(texture2d<half, access::write> outputTexture [[texture
     // Convert back to texture coordinates.
     const float2 distortedUV = float2((r * cos(phi)) / aspect + 0.5, r * sin(phi) + 0.5);
     const float2 safeUV = clamp(distortedUV, float2(0.0), float2(1.0));
+    const float2 sourceUV = float2((float(gid.x) + 0.5) * invSize.x, (float(gid.y) + 0.5) * invSize.y);
+    const float distortionMix = clamp(uniforms.distortionMix, 0.0, 1.0);
+    const float2 finalUV = mix(sourceUV, safeUV, distortionMix);
 
     constexpr sampler quadSampler(mag_filter::linear, min_filter::linear);
-    half4 value = inputTexture.sample(quadSampler, safeUV);
+    half4 value = inputTexture.sample(quadSampler, finalUV);
 
     // DSLR-like edge darkening inside the circular lens projection.
     const float vignette = smoothstep(0.35, 1.0, radius);
