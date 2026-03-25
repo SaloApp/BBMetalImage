@@ -600,6 +600,68 @@ kernel void androidPolaroidPaperKernel(
 	outputTexture.write(half4(half3(androidExtraClamp01(outRgb)), 1.0), gid);
 }
 
+kernel void androidLUTPolaroidDevelopKernel(
+	texture2d<half, access::write> outputTexture [[texture(0)]],
+	texture2d<half, access::sample> inputTexture [[texture(1)]],
+	texture2d<half, access::sample> paperTexture [[texture(2)]],
+	constant float *timeSec [[buffer(0)]],
+	constant float *developMixIn [[buffer(1)]],
+	constant float *darkThresholdIn [[buffer(2)]],
+	constant float *darkSoftnessIn [[buffer(3)]],
+	constant float *paperOpacityIn [[buffer(4)]],
+	constant float *cameraScaleIn [[buffer(5)]],
+	uint2 gid [[thread_position_in_grid]]
+) {
+	if (gid.x >= outputTexture.get_width() || gid.y >= outputTexture.get_height()) { return; }
+	constexpr sampler quadSampler(filter::linear, address::clamp_to_edge);
+	float2 resolution = float2(outputTexture.get_width(), outputTexture.get_height());
+	float2 uv = (float2(gid) + 0.5) / resolution;
+	float outAspect = resolution.x / max(resolution.y, 1.0f);
+
+	float paperAspect = float(paperTexture.get_width()) / max(float(paperTexture.get_height()), 1.0f);
+	float fitHeight = min(1.0f, outAspect / max(paperAspect, 1e-6f));
+	float2 paperUV = uv;
+	paperUV.y = (uv.y - 0.5f) / max(fitHeight, 1e-6f) + 0.5f;
+	bool paperInBounds = paperUV.y >= 0.0f && paperUV.y <= 1.0f;
+	float3 paperSample = float3(paperTexture.sample(quadSampler, androidExtraClamp01(paperUV)).rgb);
+	float3 paper = paperInBounds ? paperSample : float3(1.0f);
+
+	float cameraScale = clamp(*cameraScaleIn, 0.6f, 1.2f);
+	float2 cameraCanvasUV = (uv - 0.5f) / cameraScale + 0.5f;
+	bool cameraInBounds = (
+		cameraCanvasUV.x >= 0.0f && cameraCanvasUV.x <= 1.0f &&
+		cameraCanvasUV.y >= 0.0f && cameraCanvasUV.y <= 1.0f
+	);
+
+	float cameraAspect = float(inputTexture.get_width()) / max(float(inputTexture.get_height()), 1.0f);
+	float2 cameraUV = cameraCanvasUV;
+	if (cameraAspect > outAspect) {
+		float normalizedWidth = outAspect / max(cameraAspect, 1e-6f);
+		cameraUV.x = (cameraCanvasUV.x - 0.5f) * normalizedWidth + 0.5f;
+	} else if (cameraAspect < outAspect) {
+		float normalizedHeight = cameraAspect / max(outAspect, 1e-6f);
+		cameraUV.y = (cameraCanvasUV.y - 0.5f) * normalizedHeight + 0.5f;
+	}
+
+	// Input camera image is already LUT-processed in Swift filter chain.
+	float3 cameraColor = float3(inputTexture.sample(quadSampler, androidExtraClamp01(cameraUV)).rgb);
+
+	float paperLuma = dot(paper, float3(0.299f, 0.587f, 0.114f));
+	float darkThreshold = clamp(*darkThresholdIn, 0.0f, 1.0f);
+	float darkSoftness = clamp(*darkSoftnessIn, 0.001f, 0.5f);
+	float darkMin = clamp(darkThreshold - darkSoftness, 0.0f, 1.0f);
+	float darkMax = clamp(darkThreshold + darkSoftness, 0.0f, 1.0f);
+	float blackMask = 1.0f - smoothstep(darkMin, darkMax, paperLuma);
+
+	float developMix = clamp(*developMixIn, 0.0f, 1.0f);
+	float overlayStrength = clamp(*paperOpacityIn, 0.0f, 1.0f) * developMix;
+	float reveal = cameraInBounds ? clamp(blackMask * overlayStrength, 0.0f, 1.0f) : 0.0f;
+	float revealHard = step(0.5f, reveal);
+	float3 outRgb = mix(paper, cameraColor, revealHard);
+
+	outputTexture.write(half4(half3(androidExtraClamp01(outRgb)), 1.0), gid);
+}
+
 // MARK: - Rave
 
 kernel void androidRaveKernel(

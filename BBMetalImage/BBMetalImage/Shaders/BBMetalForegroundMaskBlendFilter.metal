@@ -118,3 +118,83 @@ kernel void foregroundColorPopKernel(
 	const half3 rgb = mix(grayscale, base.rgb, half(personMask));
 	outputTexture.write(half4(rgb, base.a), gid);
 }
+
+struct FeatureUniform {
+	float2 center;
+	float2 radius;
+	float strength;
+	float feather;
+};
+
+kernel void foregroundFeatureMagnifyKernel(
+	texture2d<half, access::write> outputTexture [[texture(0)]],
+	texture2d<half, access::sample> inputTexture [[texture(1)]],
+	texture2d<float, access::sample> inputTexture2 [[texture(2)]],
+	constant uint *shouldFlipMaskVertically [[buffer(0)]],
+	constant uint *isBackCamera [[buffer(1)]],
+	constant FeatureUniform *featureUniforms [[buffer(2)]],
+	constant uint *featureCountPtr [[buffer(3)]],
+	uint2 gid [[thread_position_in_grid]]
+) {
+	if (gid.x >= outputTexture.get_width() || gid.y >= outputTexture.get_height()) {
+		return;
+	}
+	(void)inputTexture2;
+	(void)shouldFlipMaskVertically;
+	(void)isBackCamera;
+
+	constexpr sampler quadSampler(mag_filter::linear, min_filter::linear);
+	const float width = float(outputTexture.get_width());
+	const float height = float(outputTexture.get_height());
+	const float2 uv = float2(
+		(float(gid.x) + 0.5) / width,
+		(float(gid.y) + 0.5) / height
+	);
+	const half4 base = inputTexture.sample(quadSampler, uv);
+	const uint featureCount = min(*featureCountPtr, 3u);
+	if (featureCount == 0u) {
+		outputTexture.write(base, gid);
+		return;
+	}
+
+	float bestBlend = 0.0;
+	float bestDistance = 2.0;
+	float2 warpedUV = uv;
+	for (uint i = 0u; i < featureCount; ++i) {
+		const FeatureUniform feature = featureUniforms[i];
+		const float2 safeRadius = max(feature.radius, float2(1e-4));
+		const float safeStrength = max(feature.strength, 1.0);
+		const float feather = clamp(feature.feather, 0.08, 0.95);
+		const float2 delta = uv - feature.center;
+		const float2 local = delta / safeRadius;
+		const float distance = length(local);
+		const float influence = 1.0 - smoothstep(1.0 - feather, 1.0 + feather, distance);
+		const float blend = clamp(influence, 0.0, 1.0);
+
+		if (blend > bestBlend) {
+			bestBlend = blend;
+			bestDistance = distance;
+			warpedUV = feature.center + delta / safeStrength;
+		}
+	}
+
+	if (bestBlend <= 0.0001) {
+		outputTexture.write(base, gid);
+		return;
+	}
+
+	const float2 safeWarpedUV = clamp(warpedUV, float2(0.0), float2(1.0));
+	const half4 warped = inputTexture.sample(quadSampler, safeWarpedUV);
+	const float2 blurStep = float2(1.1 / width, 1.1 / height);
+	const half3 blurRGB = (
+		inputTexture.sample(quadSampler, safeWarpedUV).rgb +
+		inputTexture.sample(quadSampler, clamp(safeWarpedUV + float2(blurStep.x, 0.0), float2(0.0), float2(1.0))).rgb +
+		inputTexture.sample(quadSampler, clamp(safeWarpedUV + float2(-blurStep.x, 0.0), float2(0.0), float2(1.0))).rgb +
+		inputTexture.sample(quadSampler, clamp(safeWarpedUV + float2(0.0, blurStep.y), float2(0.0), float2(1.0))).rgb +
+		inputTexture.sample(quadSampler, clamp(safeWarpedUV + float2(0.0, -blurStep.y), float2(0.0), float2(1.0))).rgb
+	) * 0.2h;
+	const float edgeSoft = smoothstep(0.62, 1.10, bestDistance) * bestBlend;
+	const half3 softenedWarp = mix(warped.rgb, blurRGB, half(edgeSoft * 0.52));
+	const half3 rgb = mix(base.rgb, softenedWarp, half(bestBlend));
+	outputTexture.write(half4(rgb, base.a), gid);
+}
