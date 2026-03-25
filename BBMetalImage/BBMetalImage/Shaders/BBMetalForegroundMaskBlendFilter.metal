@@ -3,18 +3,19 @@ using namespace metal;
 
 kernel void foregroundMaskBlendKernel(
 	texture2d<half, access::write> outputTexture [[texture(0)]],
-	texture2d<half, access::read> inputTexture [[texture(1)]],
+	texture2d<half, access::sample> inputTexture [[texture(1)]],
 	texture2d<float, access::sample> inputTexture2 [[texture(2)]],
 	texture2d<half, access::sample> inputTexture3 [[texture(3)]],
 	constant bool *shouldFlipMaskVertically [[buffer(0)]],
 	constant bool *isBackCamera [[buffer(1)]],
+	constant float *foregroundScale [[buffer(2)]],
+	constant float2 *foregroundInset [[buffer(3)]],
 	uint2 gid [[thread_position_in_grid]]
 ) {
 	if (gid.x >= outputTexture.get_width() || gid.y >= outputTexture.get_height()) {
 		return;
 	}
 
-	const half4 base = inputTexture.read(gid);
 	constexpr sampler quadSampler(mag_filter::linear, min_filter::linear);
 	const float width = float(outputTexture.get_width());
 	const float height = float(outputTexture.get_height());
@@ -22,23 +23,51 @@ kernel void foregroundMaskBlendKernel(
 		(float(gid.x) + 0.5) / width,
 		(float(gid.y) + 0.5) / height
 	);
+	const float clampedForegroundScale = clamp(*foregroundScale, 0.05, 1.0);
+	const float2 clampedForegroundInset = max(*foregroundInset, float2(0.0));
+	const bool previewIsMirroredHorizontally = !bool(*isBackCamera);
+	const float anchorX = previewIsMirroredHorizontally
+		? clampedForegroundInset.x
+		: (1.0 - clampedForegroundScale - clampedForegroundInset.x);
+	const float2 foregroundTopLeft = clamp(
+		float2(
+			anchorX,
+			1.0 - clampedForegroundScale - clampedForegroundInset.y
+		),
+		float2(0.0),
+		float2(1.0)
+	);
+	const float2 foregroundBottomRight = min(foregroundTopLeft + float2(clampedForegroundScale), float2(1.0));
+	const bool useForegroundWindow = clampedForegroundScale < 0.9995;
+	const bool insideForegroundWindow =
+		!useForegroundWindow ||
+		(
+			uv.x >= foregroundTopLeft.x &&
+			uv.x <= foregroundBottomRight.x &&
+			uv.y >= foregroundTopLeft.y &&
+			uv.y <= foregroundBottomRight.y
+		);
+	const float2 sourceUV = insideForegroundWindow
+		? (useForegroundWindow ? (uv - foregroundTopLeft) / clampedForegroundScale : uv)
+		: float2(0.5, 0.5);
+	const half4 base = inputTexture.sample(quadSampler, clamp(sourceUV, float2(0.0), float2(1.0)));
 	const float2 maskUV = float2(
-		(float(gid.x) + 0.5) / width,
-		bool(*shouldFlipMaskVertically) ? (1.0 - uv.y) : uv.y
+		sourceUV.x,
+		bool(*shouldFlipMaskVertically) ? (1.0 - sourceUV.y) : sourceUV.y
 	);
 	const float2 maskTexel = float2(
 		1.0 / max(float(inputTexture2.get_width()), 1.0),
 		1.0 / max(float(inputTexture2.get_height()), 1.0)
 	);
-	const float centerMask = clamp(inputTexture2.sample(quadSampler, maskUV).r, 0.0, 1.0);
-	const float leftMask = clamp(inputTexture2.sample(quadSampler, maskUV + float2(-maskTexel.x, 0.0)).r, 0.0, 1.0);
-	const float rightMask = clamp(inputTexture2.sample(quadSampler, maskUV + float2(maskTexel.x, 0.0)).r, 0.0, 1.0);
-	const float topMask = clamp(inputTexture2.sample(quadSampler, maskUV + float2(0.0, -maskTexel.y)).r, 0.0, 1.0);
-	const float bottomMask = clamp(inputTexture2.sample(quadSampler, maskUV + float2(0.0, maskTexel.y)).r, 0.0, 1.0);
-	const float topLeftMask = clamp(inputTexture2.sample(quadSampler, maskUV + float2(-maskTexel.x, -maskTexel.y)).r, 0.0, 1.0);
-	const float topRightMask = clamp(inputTexture2.sample(quadSampler, maskUV + float2(maskTexel.x, -maskTexel.y)).r, 0.0, 1.0);
-	const float bottomLeftMask = clamp(inputTexture2.sample(quadSampler, maskUV + float2(-maskTexel.x, maskTexel.y)).r, 0.0, 1.0);
-	const float bottomRightMask = clamp(inputTexture2.sample(quadSampler, maskUV + float2(maskTexel.x, maskTexel.y)).r, 0.0, 1.0);
+	const float centerMask = insideForegroundWindow ? clamp(inputTexture2.sample(quadSampler, maskUV).r, 0.0, 1.0) : 0.0;
+	const float leftMask = insideForegroundWindow ? clamp(inputTexture2.sample(quadSampler, maskUV + float2(-maskTexel.x, 0.0)).r, 0.0, 1.0) : 0.0;
+	const float rightMask = insideForegroundWindow ? clamp(inputTexture2.sample(quadSampler, maskUV + float2(maskTexel.x, 0.0)).r, 0.0, 1.0) : 0.0;
+	const float topMask = insideForegroundWindow ? clamp(inputTexture2.sample(quadSampler, maskUV + float2(0.0, -maskTexel.y)).r, 0.0, 1.0) : 0.0;
+	const float bottomMask = insideForegroundWindow ? clamp(inputTexture2.sample(quadSampler, maskUV + float2(0.0, maskTexel.y)).r, 0.0, 1.0) : 0.0;
+	const float topLeftMask = insideForegroundWindow ? clamp(inputTexture2.sample(quadSampler, maskUV + float2(-maskTexel.x, -maskTexel.y)).r, 0.0, 1.0) : 0.0;
+	const float topRightMask = insideForegroundWindow ? clamp(inputTexture2.sample(quadSampler, maskUV + float2(maskTexel.x, -maskTexel.y)).r, 0.0, 1.0) : 0.0;
+	const float bottomLeftMask = insideForegroundWindow ? clamp(inputTexture2.sample(quadSampler, maskUV + float2(-maskTexel.x, maskTexel.y)).r, 0.0, 1.0) : 0.0;
+	const float bottomRightMask = insideForegroundWindow ? clamp(inputTexture2.sample(quadSampler, maskUV + float2(maskTexel.x, maskTexel.y)).r, 0.0, 1.0) : 0.0;
 	const float smoothedMask = (
 		centerMask * 4.0 +
 		(leftMask + rightMask + topMask + bottomMask) * 2.0 +
@@ -47,7 +76,9 @@ kernel void foregroundMaskBlendKernel(
 	const float maskThresholdLow = bool(*isBackCamera) ? 0.48 : 0.42;
 	const float maskThresholdHigh = bool(*isBackCamera) ? 0.86 : 0.82;
 	const float maskGamma = bool(*isBackCamera) ? 1.45 : 1.35;
-	const float personMask = smoothstep(maskThresholdLow, maskThresholdHigh, pow(smoothedMask, maskGamma));
+	const float personMask = insideForegroundWindow
+		? smoothstep(maskThresholdLow, maskThresholdHigh, pow(smoothedMask, maskGamma))
+		: 0.0;
 	const float outAspect = width / height;
 	const float bgWidth = float(inputTexture3.get_width());
 	const float bgHeight = float(inputTexture3.get_height());
