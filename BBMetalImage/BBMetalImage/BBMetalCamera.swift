@@ -318,7 +318,11 @@ public class BBMetalCamera: NSObject {
   }
 
   public var isUltraWideBackCameraSupported: Bool {
-    AVCaptureDevice.default(.builtInUltraWideCamera, for: .video, position: .back) != nil
+    if #available(iOS 13.0, *) {
+      return AVCaptureDevice.default(.builtInUltraWideCamera, for: .video, position: .back) != nil
+    } else {
+      return false
+    }
   }
 
   public var currentAbsoluteZoomFactor: CGFloat {
