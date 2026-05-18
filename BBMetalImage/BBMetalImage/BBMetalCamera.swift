@@ -384,7 +384,14 @@ public class BBMetalCamera: NSObject {
       device.deviceType.rawValue
     }))
 
-    guard let videoDevice = deviceLookup.device(for: position) else {
+    let videoDevice: AVCaptureDevice?
+    if #available(iOS 13.0, *), captureSession is AVCaptureMultiCamSession {
+      videoDevice = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: position)
+        ?? deviceLookup.device(for: position)
+    } else {
+      videoDevice = deviceLookup.device(for: position)
+    }
+    guard let videoDevice else {
       throw BBMetalCameraError.noVideoDevice
     }
 
