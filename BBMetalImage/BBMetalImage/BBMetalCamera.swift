@@ -178,8 +178,36 @@ public class BBMetalCamera: NSObject {
   public var sessionInterruptionHandler:
     ((AVCaptureSession, AVCaptureSession.InterruptionReason, Bool) -> Void)?
 
+  /// Called when an interruption ends and the session is resumed.
+  /// true means it's separate audio session
+  public var sessionInterruptionEndedHandler: ((AVCaptureSession, Bool) -> Void)?
+
   /// true means it's separate audio session
   public var sessionErrorHandler: ((AVCaptureSession, AVError, Bool) -> Void)?
+
+  /// Called when the camera resumes a session on its own after an interruption or runtime error.
+  public var sessionDidRecoverHandler: ((AVCaptureSession) -> Void)?
+
+  private static let maxSessionRestartAttempts = 3
+  /// The system resumes most interrupted sessions itself. Waiting before stepping in keeps the two
+  /// from restarting the same session at once, which is visible as a flickering preview.
+  private static let sessionResumeGracePeriod: TimeInterval = 0.5
+  /// Hard floor between two resume attempts, so no interruption pattern can turn into a restart loop.
+  private static let minimumSessionResumeInterval: CFTimeInterval = 2.0
+  /// Zoom ramps change the factor by 2^rate per second, so one doubling takes ~0.17s here.
+  private static let zoomRampRate: Float = 6.0
+
+  /// Shared on purpose: in multi-cam both cameras observe the same session, so restarts have to be
+  /// serialized across instances rather than racing two `startRunning` calls on one session.
+  private static let sessionRestartQueue = DispatchQueue(
+    label: "com.Kaibo.BBMetalImage.Camera.sessionRestart", qos: .userInitiated)
+  /// Whether the app still wants this camera running. Recovery only resumes sessions the app
+  /// has not explicitly stopped.
+  private var isRunningRequested: Bool
+  private var sessionRestartAttempt: Int
+  private var lastSessionResumeTime: CFTimeInterval
+  private var lastInterruptionReason: AVCaptureSession.InterruptionReason?
+  private var observedSessions: Set<ObjectIdentifier>
 
   private var capturedFrameCount: Int
   private var totalCaptureFrameTime: Double
@@ -252,6 +280,12 @@ public class BBMetalCamera: NSObject {
   }
   private var _canTakePhoto: Bool
 
+  /// Opt-in: prefer an active format that can deliver large stills, and request them from the photo
+  /// output. Off by default because a still larger than the active video format makes the sensor
+  /// switch readout modes on every capture, which costs hundreds of milliseconds of shutter latency.
+  /// Set this before `setFrameRate(_:)` so format selection can take it into account.
+  public var prefersHighResolutionStills: Bool = false
+
   /// Camera photo delegate handling taking photo result.
   /// To take photo, this property should not be nil.
   public weak var photoDelegate: BBMetalCameraPhotoDelegate? {
@@ -318,11 +352,7 @@ public class BBMetalCamera: NSObject {
   }
 
   public var isUltraWideBackCameraSupported: Bool {
-    if #available(iOS 13.0, *) {
-      return AVCaptureDevice.default(.builtInUltraWideCamera, for: .video, position: .back) != nil
-    } else {
-      return false
-    }
+    AVCaptureDevice.default(.builtInUltraWideCamera, for: .video, position: .back) != nil
   }
 
   public var currentAbsoluteZoomFactor: CGFloat {
@@ -373,6 +403,10 @@ public class BBMetalCamera: NSObject {
     totalCaptureFrameTime = 0
     ignoreInitialFrameCount = 5
     originalOrientation = .portrait
+    isRunningRequested = false
+    sessionRestartAttempt = 0
+    lastSessionResumeTime = 0
+    observedSessions = []
     self.multitpleSessions = multitpleSessions
     lock = DispatchSemaphore(value: 1)
 
@@ -385,7 +419,7 @@ public class BBMetalCamera: NSObject {
     }))
 
     let videoDevice: AVCaptureDevice?
-    if #available(iOS 13.0, *), captureSession is AVCaptureMultiCamSession {
+    if captureSession is AVCaptureMultiCamSession {
       videoDevice = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: position)
         ?? deviceLookup.device(for: position)
     } else {
@@ -438,6 +472,7 @@ public class BBMetalCamera: NSObject {
     }
     originalOrientation = connection.videoOrientation
     connection.videoOrientation = .portrait
+    configureVideoStabilization(for: connection)
 
     session.commitConfiguration()
 
@@ -496,9 +531,16 @@ public class BBMetalCamera: NSObject {
   }
 
   private func removeAudioInputAndOutput() {
-    session.beginConfiguration()
+    // With nothing to tear down this used to reconfigure the video session anyway. On a live
+    // multi-cam session that alone re-provisions hardware and makes both previews re-run their
+    // exposure ramp, and the dual-camera path clears the secondary camera's audio on every attach.
+    guard audioInput != nil || audioOutput != nil else { return }
+    // Audio lives in its own session when `multitpleSessions` is set; reconfiguring the video
+    // session in that case would disturb capture for no reason.
+    let configuredSession: AVCaptureSession? = multitpleSessions ? audioSession : session
+    configuredSession?.beginConfiguration()
     _removeAudioInputAndOutput()
-    session.commitConfiguration()
+    configuredSession?.commitConfiguration()
   }
 
   private func _removeAudioInputAndOutput() {
@@ -534,7 +576,48 @@ public class BBMetalCamera: NSObject {
     session.addOutput(output)
     photoOutput = output
 
+    output.maxPhotoQualityPrioritization = .balanced
+    if let dimensions = preferredPhotoDimensions() {
+      output.maxPhotoDimensions = dimensions
+    }
+    if #available(iOS 17.0, *) {
+      // Zero shutter lag captures the frame from the moment the shutter was pressed rather than the
+      // one that lands after the request travels through the pipeline.
+      if output.isZeroShutterLagSupported { output.isZeroShutterLagEnabled = true }
+      if output.isResponsiveCaptureSupported { output.isResponsiveCaptureEnabled = true }
+    }
+
     return true
+  }
+
+  /// Still dimensions to request. The app publishes at most 1920px on the long side, so the smallest
+  /// supported size that comfortably clears that is preferred over the sensor maximum: it keeps the
+  /// one-shot buffer (and the filter chain's intermediate textures) several times smaller for the
+  /// same delivered quality. Falls back to the largest available when there is no such option.
+  private func preferredPhotoDimensions() -> CMVideoDimensions? {
+    guard prefersHighResolutionStills else { return nil }
+
+    let supported = camera.activeFormat.supportedMaxPhotoDimensions
+    guard !supported.isEmpty else { return nil }
+
+    let minimumLongSide: Int32 = 2560
+    let ascending = supported.sorted {
+      Int($0.width) * Int($0.height) < Int($1.width) * Int($1.height)
+    }
+    return ascending.first { max($0.width, $0.height) >= minimumLongSide } ?? ascending.last
+  }
+
+  private static func maxStillPixelCount(of format: AVCaptureDevice.Format) -> Int {
+    format.supportedMaxPhotoDimensions.reduce(0) { partial, dimensions in
+      max(partial, Int(dimensions.width) * Int(dimensions.height))
+    }
+  }
+
+  /// Supported still sizes belong to the active format, so this has to be re-applied whenever the
+  /// format changes — on frame-rate selection and after switching to the other camera.
+  private func updatePhotoOutputDimensions() {
+    guard let output = photoOutput, let dimensions = preferredPhotoDimensions() else { return }
+    output.maxPhotoDimensions = dimensions
   }
 
   private func removePhotoOutput() {
@@ -613,9 +696,14 @@ public class BBMetalCamera: NSObject {
   ) {
     lock.wait()
     if let output = photoOutput, _photoDelegate != nil {
+      // Uncompressed BGRA keeps the still in a form the Metal filter chain can consume directly.
       let currentSettings = AVCapturePhotoSettings(format: [
         kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA
       ])
+      // `.speed` on purpose: multi-frame processing (Deep Fusion, Smart HDR) does not run for
+      // uncompressed captures, so anything above `.speed` costs shutter latency and returns nothing.
+      currentSettings.photoQualityPrioritization = .speed
+      currentSettings.maxPhotoDimensions = output.maxPhotoDimensions
       if camera.hasFlash {
         currentSettings.flashMode = flashMode
       }
@@ -659,24 +747,42 @@ public class BBMetalCamera: NSObject {
     else { return false }
     originalOrientation = connection.videoOrientation
     connection.videoOrientation = .portrait
+    configureVideoStabilization(for: connection)
+    updatePhotoOutputDimensions()
 
     return true
   }
 
-  @available(iOS 16, *)
-  public func setRelativeZoomFactor(_ relativeZoom: CGFloat) {
-    let absoluteZoom = relativeZoom / currentDeviceDisplayVideoZoomFactorMultiplier
-
-    self.setAbsoluteZoomFactor(absoluteZoom)
+  /// Stabilization is applied to the video data output, so it benefits both the live preview and
+  /// anything recorded from it. `.standard` is deliberate: the cinematic modes buffer several
+  /// frames ahead, which reads as preview lag in a realtime filter pipeline. Multi-cam sessions are
+  /// skipped because stabilization raises `hardwareCost` and can push the session over budget.
+  private func configureVideoStabilization(for connection: AVCaptureConnection) {
+    if session is AVCaptureMultiCamSession { return }
+    guard camera.activeFormat.isVideoStabilizationModeSupported(.standard) else { return }
+    connection.preferredVideoStabilizationMode = .standard
   }
 
-  @available(iOS 16, *)
-  public func setAbsoluteZoomFactor(_ absoluteZoom: CGFloat) {
+  public func setRelativeZoomFactor(_ relativeZoom: CGFloat, animated: Bool = false) {
+    let absoluteZoom = relativeZoom / currentDeviceDisplayVideoZoomFactorMultiplier
+
+    self.setAbsoluteZoomFactor(absoluteZoom, animated: animated)
+  }
+
+  /// - Parameter animated: ramps to the target instead of jumping to it. Use it for discrete zoom
+  ///   steps (0.5x/1x/2x); a continuous gesture must stay unanimated, since restarting a ramp on
+  ///   every gesture update lags behind the finger.
+  public func setAbsoluteZoomFactor(_ absoluteZoom: CGFloat, animated: Bool = false) {
     let clampedZoom = max(
       camera.minAvailableVideoZoomFactor, min(absoluteZoom, camera.maxAvailableVideoZoomFactor))
 
     self.configureCamera {
-      $0.videoZoomFactor = clampedZoom
+      if animated {
+        $0.ramp(toVideoZoomFactor: clampedZoom, withRate: BBMetalCamera.zoomRampRate)
+      } else {
+        if $0.isRampingVideoZoom { $0.cancelVideoZoomRamp() }
+        $0.videoZoomFactor = clampedZoom
+      }
     }
   }
 
@@ -690,28 +796,32 @@ public class BBMetalCamera: NSObject {
     lock.wait()
     do {
       try camera.lockForConfiguration()
-      var targetFormat: AVCaptureDevice.Format?
       let dimensions = CMVideoFormatDescriptionGetDimensions(camera.activeFormat.formatDescription)
-      for format in camera.formats {
+      let candidates = camera.formats.filter { format in
         let newDimensions = CMVideoFormatDescriptionGetDimensions(format.formatDescription)
-        if dimensions.width == newDimensions.width,
+        guard dimensions.width == newDimensions.width,
           dimensions.height == newDimensions.height
-        {
-          for range in format.videoSupportedFrameRateRanges {
-            if range.maxFrameRate >= frameRate,
-              range.minFrameRate <= frameRate
-            {
-              targetFormat = format
-              break
-            }
-          }
-          if targetFormat != nil { break }
+        else { return false }
+        return format.videoSupportedFrameRateRanges.contains { range in
+          range.maxFrameRate >= frameRate && range.minFrameRate <= frameRate
         }
       }
+
+      // Every candidate delivers the same video dimensions, so preferring the one with the largest
+      // still support raises photo resolution without changing the preview or recording pipeline.
+      var targetFormat = candidates.first
+      if prefersHighResolutionStills {
+        targetFormat =
+          candidates.max { lhs, rhs in
+            BBMetalCamera.maxStillPixelCount(of: lhs) < BBMetalCamera.maxStillPixelCount(of: rhs)
+          } ?? candidates.first
+      }
+
       if let format = targetFormat {
         camera.activeFormat = format
         camera.activeVideoMaxFrameDuration = CMTime(value: 1, timescale: CMTimeScale(frameRate))
         camera.activeVideoMinFrameDuration = CMTime(value: 1, timescale: CMTimeScale(frameRate))
+        updatePhotoOutputDimensions()
         success = true
       } else {
         print("Can not find valid format for camera frame rate \(frameRate)")
@@ -743,6 +853,8 @@ public class BBMetalCamera: NSObject {
   /// Starts capturing
   public func start() {
     lock.wait()
+    isRunningRequested = true
+    sessionRestartAttempt = 0
     addObservers(session: session)
     session.startRunning()
     if multitpleSessions, let session = audioSession {
@@ -755,6 +867,7 @@ public class BBMetalCamera: NSObject {
   /// Stops capturing
   public func stop() {
     lock.wait()
+    isRunningRequested = false
     removeObservers(session: session)
     session.stopRunning()
     if multitpleSessions, let session = audioSession {
@@ -813,7 +926,10 @@ extension BBMetalCamera: BBMetalImageSource {
 }
 
 extension BBMetalCamera {
+  /// Must be called with `lock` held. Registering twice for the same session would deliver every
+  /// interruption/error callback once per registration.
   fileprivate func addObservers(session: AVCaptureSession) {
+    guard observedSessions.insert(ObjectIdentifier(session)).inserted else { return }
     NotificationCenter.default.addObserver(
       self, selector: #selector(BBMetalCamera.sessionRuntimeErrorOccurred(notification:)),
       name: NSNotification.Name.AVCaptureSessionRuntimeError, object: session)
@@ -825,7 +941,9 @@ extension BBMetalCamera {
       name: NSNotification.Name.AVCaptureSessionInterruptionEnded, object: session)
   }
 
+  /// Must be called with `lock` held.
   fileprivate func removeObservers(session: AVCaptureSession) {
+    guard observedSessions.remove(ObjectIdentifier(session)) != nil else { return }
     NotificationCenter.default.removeObserver(
       self, name: NSNotification.Name.AVCaptureSessionRuntimeError, object: session)
     NotificationCenter.default.removeObserver(
@@ -844,12 +962,34 @@ extension BBMetalCamera {
     else {
       return
     }
+    lock.wait()
+    lastInterruptionReason = reason
+    lock.signal()
     let isSeparateAudioSession = multitpleSessions && session == audioSession
     sessionInterruptionHandler?(session, reason, isSeparateAudioSession)
   }
 
   @objc fileprivate func sessionInterruptionEnded(notification: Notification) {
-    // TODO: implement
+    guard let session = notification.object as? AVCaptureSession else { return }
+    let isSeparateAudioSession = multitpleSessions && session == audioSession
+    sessionInterruptionEndedHandler?(session, isSeparateAudioSession)
+
+    // Multi-cam renegotiates hardware while it spins up and is interrupted several times on the way,
+    // and the system brings it back itself. Resuming here restarts a session that is already
+    // recovering, which is visible as a flickering preview.
+    if session is AVCaptureMultiCamSession { return }
+
+    lock.wait()
+    let reason = lastInterruptionReason
+    lock.signal()
+    // Under system pressure the fix is to shed load, not to restart: restarting is immediately
+    // interrupted again.
+    guard reason != .videoDeviceNotAvailableDueToSystemPressure else { return }
+
+    // A session stopped by an interruption (phone call, another app taking the camera, Split View)
+    // does not always come back on its own; resuming here is what keeps the preview from going
+    // permanently black.
+    resumeSessionIfNeeded(session)
   }
 
   @objc fileprivate func sessionRuntimeErrorOccurred(notification: Notification) {
@@ -860,6 +1000,58 @@ extension BBMetalCamera {
     }
     let isSeparateAudioSession = multitpleSessions && session == audioSession
     sessionErrorHandler?(session, error, isSeparateAudioSession)
+
+    // Media services reset tears the capture stack down under us; restarting the session is the
+    // documented recovery. Other runtime errors are left to the app to decide on.
+    guard error.code == .mediaServicesWereReset else { return }
+    resumeSessionIfNeeded(session, isRetry: true)
+  }
+
+  /// Resumes a session the app still wants running. Retries are capped and backed off so a session
+  /// that keeps failing does not spin forever.
+  fileprivate func resumeSessionIfNeeded(_ session: AVCaptureSession, isRetry: Bool = false) {
+    lock.wait()
+    guard isRunningRequested else {
+      lock.signal()
+      return
+    }
+    var delay = BBMetalCamera.sessionResumeGracePeriod
+    if isRetry {
+      guard sessionRestartAttempt < BBMetalCamera.maxSessionRestartAttempts else {
+        lock.signal()
+        return
+      }
+      sessionRestartAttempt += 1
+      delay = 0.5 * Double(sessionRestartAttempt)
+    }
+    lock.signal()
+
+    // `startRunning` blocks, so it must not run on the notification thread.
+    BBMetalCamera.sessionRestartQueue.asyncAfter(deadline: .now() + delay) { [weak self] in
+      guard let self = self else { return }
+
+      // Re-checked after the delay: by now the system has usually resumed the session itself.
+      guard !session.isRunning else { return }
+
+      let now = CACurrentMediaTime()
+      self.lock.wait()
+      let shouldRun = self.isRunningRequested
+      let isTooSoon =
+        now - self.lastSessionResumeTime < BBMetalCamera.minimumSessionResumeInterval
+      if shouldRun, !isTooSoon {
+        self.lastSessionResumeTime = now
+      }
+      self.lock.signal()
+
+      guard shouldRun, !isTooSoon else { return }
+      session.startRunning()
+
+      guard session.isRunning else { return }
+      self.lock.wait()
+      self.sessionRestartAttempt = 0
+      self.lock.signal()
+      self.sessionDidRecoverHandler?(session)
+    }
   }
 }
 
@@ -970,6 +1162,10 @@ extension BBMetalCamera: AVCaptureVideoDataOutputSampleBufferDelegate,
 
   private func texture(with sampleBuffer: CMSampleBuffer) -> BBMetalVideoTextureItem? {
     guard let imageBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return nil }
+    return texture(with: imageBuffer)
+  }
+
+  private func texture(with imageBuffer: CVPixelBuffer) -> BBMetalVideoTextureItem? {
     let width = CVPixelBufferGetWidth(imageBuffer)
     let height = CVPixelBufferGetHeight(imageBuffer)
 
@@ -999,32 +1195,30 @@ extension BBMetalCamera: AVCaptureVideoDataOutputSampleBufferDelegate,
 extension BBMetalCamera: AVCapturePhotoCaptureDelegate {
   public func photoOutput(
     _ output: AVCapturePhotoOutput,
-    didFinishProcessingPhoto photoSampleBuffer: CMSampleBuffer?,
-    previewPhoto previewPhotoSampleBuffer: CMSampleBuffer?,
-    resolvedSettings: AVCaptureResolvedPhotoSettings,
-    bracketSettings: AVCaptureBracketedStillImageSettings?,
+    didFinishProcessingPhoto photo: AVCapturePhoto,
     error: Error?
   ) {
-
     guard let delegate = photoDelegate else { return }
 
     if let error = error {
       delegate.camera(self, didFail: error)
+      return
+    }
 
-    } else if let sampleBuffer = photoSampleBuffer,
-      let texture = texture(with: sampleBuffer),
-      let rotatedTexture = rotatedTexture(with: texture.metalTexture, angle: 90)
-    {
+    guard let pixelBuffer = photo.pixelBuffer,
+      let texture = texture(with: pixelBuffer),
       // Setting `videoOrientation` of `AVCaptureConnection` dose not work. So rotate texture here.
-      delegate.camera(self, didOutput: rotatedTexture)
-
-    } else {
+      let rotatedTexture = rotatedTexture(with: texture.metalTexture, angle: 90)
+    else {
       delegate.camera(
         self,
         didFail: NSError(
           domain: "BBMetalCamera.Photo", code: 0,
           userInfo: [NSLocalizedDescriptionKey: "Can not get Metal texture"]))
+      return
     }
+
+    delegate.camera(self, didOutput: rotatedTexture)
   }
 
   private func rotatedTexture(with inTexture: MTLTexture, angle: Float) -> MTLTexture? {
@@ -1055,15 +1249,13 @@ extension BBMetalCamera {
     var internalErrorHandler: ((BBMetalCameraInternalError) -> Void)?
 
     init() {
-      var deviceTypes: [AVCaptureDevice.DeviceType] = []
-
-      if #available(iOS 13.0, *) {
-        deviceTypes.append(.builtInTripleCamera)
-        deviceTypes.append(.builtInDualWideCamera)
-      }
-
-      deviceTypes.append(.builtInDualCamera)
-      deviceTypes.append(.builtInWideAngleCamera)
+      // Order matters: `device(for:)` picks the earliest match, preferring the richest device.
+      let deviceTypes: [AVCaptureDevice.DeviceType] = [
+        .builtInTripleCamera,
+        .builtInDualWideCamera,
+        .builtInDualCamera,
+        .builtInWideAngleCamera
+      ]
 
       self.deviceTypes = deviceTypes
       self.session = AVCaptureDevice.DiscoverySession(
