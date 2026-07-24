@@ -12,6 +12,21 @@ public typealias BBMetalVideoWriterStart = (CMTime) -> Void
 
 public typealias BBMetalVideoWriterProgress = (BBMetalVideoWriterProgressType) -> Void
 
+public enum BBMetalVideoWriterRotation: Int32 {
+    case none = 0
+    case clockwise = 1
+    case counterClockwise = 2
+
+    func outputFrameSize(for frameSize: BBMetalIntSize) -> BBMetalIntSize {
+        switch self {
+        case .none:
+            return frameSize
+        case .clockwise, .counterClockwise:
+            return BBMetalIntSize(width: frameSize.height, height: frameSize.width)
+        }
+    }
+}
+
 public enum BBMetalVideoWriterProgressType {
     case video(CMTime, Bool)
     case audio(CMTime, Bool)
@@ -35,6 +50,7 @@ public class BBMetalVideoWriter {
     public let outputSettings: [String : Any]
 
     public var videoDidAppendFrameHandler: ((CVPixelBuffer, TimeInterval) -> Void)?
+    public var videoRotation: BBMetalVideoWriterRotation = .none
     
     private var computePipeline: MTLComputePipelineState!
     private var outputTexture: MTLTexture!
@@ -106,21 +122,12 @@ public class BBMetalVideoWriter {
         let kernelFunction = library.makeFunction(name: "yopeVideoWriterKernel")!
         computePipeline = try! BBMetalDevice.sharedDevice.makeComputePipelineState(function: kernelFunction)
         
-        let descriptor = MTLTextureDescriptor()
-        descriptor.pixelFormat = .bgra8Unorm
-        descriptor.width = frameSize.width
-        descriptor.height = frameSize.height
-        descriptor.usage = [.shaderRead, .shaderWrite]
-        outputTexture = BBMetalDevice.sharedDevice.makeTexture(descriptor: descriptor)
-        
         threadgroupSize = MTLSize(width: 16, height: 16, depth: 1)
-        threadgroupCount = MTLSize(width: (frameSize.width + threadgroupSize.width - 1) / threadgroupSize.width,
-                                   height: (frameSize.height + threadgroupSize.height - 1) / threadgroupSize.height,
-                                   depth: 1)
-        
+        threadgroupCount = MTLSize(width: 1, height: 1, depth: 1)
         _hasAudioTrack = true
         _expectsMediaDataInRealTime = true
         lock = DispatchSemaphore(value: 1)
+        configureOutputTexture(size: frameSize)
     }
     
     /// Starts receiving Metal texture and writing video file
@@ -213,10 +220,13 @@ public class BBMetalVideoWriter {
             print("Should not call \(#function) while video writer is not writing")
         }
     }
-    
+
     private func prepareAssetWriter() -> Bool {
-		guard let url else { return false }
-		
+        guard let url else { return false }
+
+        let outputFrameSize = videoRotation.outputFrameSize(for: frameSize)
+        configureOutputTexture(size: outputFrameSize)
+
         writer = try? AVAssetWriter(url: url, fileType: fileType)
         if writer == nil {
             print("Can not create asset writer")
@@ -224,8 +234,8 @@ public class BBMetalVideoWriter {
         }
         
         var settings = outputSettings
-        settings[AVVideoWidthKey] = frameSize.width
-        settings[AVVideoHeightKey] = frameSize.height
+        settings[AVVideoWidthKey] = outputFrameSize.width
+        settings[AVVideoHeightKey] = outputFrameSize.height
         videoInput = AVAssetWriterInput(mediaType: .video, outputSettings: settings)
         videoInput.expectsMediaDataInRealTime = _expectsMediaDataInRealTime
         
@@ -236,8 +246,8 @@ public class BBMetalVideoWriter {
         writer.add(videoInput)
         
         let attributes: [String : Any] = [kCVPixelBufferPixelFormatTypeKey as String : kCVPixelFormatType_32BGRA,
-                                          kCVPixelBufferWidthKey as String : frameSize.width,
-                                          kCVPixelBufferHeightKey as String : frameSize.height]
+                                          kCVPixelBufferWidthKey as String : outputFrameSize.width,
+                                          kCVPixelBufferHeightKey as String : outputFrameSize.height]
         videoPixelBufferInput = AVAssetWriterInputPixelBufferAdaptor(assetWriterInput: videoInput, sourcePixelBufferAttributes: attributes)
         
         if _hasAudioTrack {
@@ -254,7 +264,20 @@ public class BBMetalVideoWriter {
         }
         return true
     }
-    
+
+    private func configureOutputTexture(size: BBMetalIntSize) {
+        let descriptor = MTLTextureDescriptor()
+        descriptor.pixelFormat = .bgra8Unorm
+        descriptor.width = size.width
+        descriptor.height = size.height
+        descriptor.usage = [.shaderRead, .shaderWrite]
+        outputTexture = BBMetalDevice.sharedDevice.makeTexture(descriptor: descriptor)
+
+        threadgroupCount = MTLSize(width: (size.width + threadgroupSize.width - 1) / threadgroupSize.width,
+                                   height: (size.height + threadgroupSize.height - 1) / threadgroupSize.height,
+                                   depth: 1)
+    }
+
     private func reset() {
         writer = nil
         videoInput = nil
@@ -334,9 +357,16 @@ extension BBMetalVideoWriter: BBMetalImageConsumer {
             length: MemoryLayout<Bool>.size,
             options: []
         )
+        var rotation = videoRotation.rawValue
+        let rotationBuffer = BBMetalDevice.sharedDevice.makeBuffer(
+            bytes: &rotation,
+            length: MemoryLayout<Int32>.size,
+            options: []
+        )
         
         encoder.setBuffer(horizontalBuffer, offset: 0, index: 0)
         encoder.setBuffer(verticalBuffer, offset: 0, index: 1)
+        encoder.setBuffer(rotationBuffer, offset: 0, index: 2)
         
         encoder.dispatchThreadgroups(threadgroupCount, threadsPerThreadgroup: threadgroupSize)
         encoder.endEncoding()

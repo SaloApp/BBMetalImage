@@ -21,9 +21,21 @@ public class BBMetalMultipleCamera {
     
     public init() throws {
         session = .init()
-        
-        self.backCamera = try BBMetalCamera(captureSession: session, position: .back)
-        self.frontCamera = try BBMetalCamera(captureSession: session, position: .front)
+
+        // `multitpleSessions: true` keeps the microphone in its own capture session. Attaching it to
+        // the multi-cam session instead would reconfigure a live session at the moment recording
+        // starts, and re-provisioning multi-cam hardware makes both previews re-run their exposure
+        // ramp — visible as a freeze and a darkening pass over each camera in turn.
+        self.backCamera = try BBMetalCamera(
+            captureSession: session,
+            position: .back,
+            multitpleSessions: true
+        )
+        self.frontCamera = try BBMetalCamera(
+            captureSession: session,
+            position: .front,
+            multitpleSessions: true
+        )
     }
 
 }

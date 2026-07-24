@@ -82,6 +82,8 @@ open class BBMetalView: MTKView {
     
     private var frameSize: CGSize
     private var lastFrameSize: CGSize
+    /// Mirrors `drawableSize` so the comparison never has to touch the layer off the main thread.
+    private var appliedDrawableSize: CGSize = .zero
     
     private var textureWidth: Int = 0
     private var textureHeight: Int = 0
@@ -120,6 +122,10 @@ open class BBMetalView: MTKView {
         lock = DispatchSemaphore(value: 1)
         super.init(frame: frameRect, device: device ?? BBMetalDevice.sharedDevice)
         super.isPaused = true
+        // The drawable size is driven by the incoming texture, not by layout; leaving the automatic
+        // resize on would fight that and leave `appliedDrawableSize` describing a size the layer no
+        // longer has.
+        autoResizeDrawable = false
     }
     
     required public init(coder: NSCoder) {
@@ -129,18 +135,32 @@ open class BBMetalView: MTKView {
         super.init(coder: coder)
         super.device = BBMetalDevice.sharedDevice
         super.isPaused = true
+        autoResizeDrawable = false
         frameSize = bounds.size
         lastFrameSize = frameSize
     }
     
     public override func draw(_ rect: CGRect) {
-        guard let texture = self.texture,
-            let drawable = currentDrawable,
+        guard let texture = self.texture else { return }
+
+        // `drawableSize` mutates the layer, which is only legal on the main thread, and it recreates
+        // the layer's drawable pool, so it must not run while a drawable is already checked out.
+        // The camera preview draws on its own queue, and the old code did both on every frame:
+        // it took `currentDrawable` first and then resized, rendering into a stale drawable whenever
+        // the texture size changed. Apply the resize on the main thread and let the next frame use it.
+        let targetDrawableSize = CGSize(width: texture.width, height: texture.height)
+        if appliedDrawableSize != targetDrawableSize {
+            appliedDrawableSize = targetDrawableSize
+            DispatchQueue.main.async { [weak self] in
+                self?.drawableSize = targetDrawableSize
+            }
+            return
+        }
+
+        guard let drawable = currentDrawable,
             let renderPassDescriptor = currentRenderPassDescriptor,
             let commandBuffer = BBMetalDevice.sharedCommandQueue.makeCommandBuffer() else { return }
-        
-        drawableSize = CGSize(width: texture.width, height: texture.height)
-        
+
         if frameSize != lastFrameSize ||
             texture.width != textureWidth ||
             texture.height != textureHeight ||
