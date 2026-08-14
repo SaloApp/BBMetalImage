@@ -227,6 +227,10 @@ public class BBMetalCamera: NSObject {
   private var audioInput: AVCaptureDeviceInput?
   private var audioOutput: AVCaptureAudioDataOutput?
   private var audioOutputQueue: DispatchQueue!
+  // Guards the audio graph so build/start/teardown run OUTSIDE `lock`: the video captureOutput
+  // takes `lock` every frame, and a cold attach under it froze the preview for ~0.5s.
+  // Ordering rule: `lock` may nest `audioGraphLock`, never the reverse.
+  private let audioGraphLock = DispatchSemaphore(value: 1)
 
   /// Audio consumer processing audio sample buffer.
   /// Set this property to nil (default value) if not recording audio.
@@ -239,18 +243,21 @@ public class BBMetalCamera: NSObject {
       return a
     }
     set {
-      lock.wait()
-      audioConsumerAssignError = nil
-      _audioConsumer = newValue
+      // Audio graph work runs outside `lock` (see `audioGraphLock`); only the consumer swap is
+      // under it.
       if newValue != nil {
-        if let error = addAudioInputAndOutput() {
-          _audioConsumer = nil
-          audioConsumerAssignError = error
-        }
+        let error = ensureAudioCaptureRunning()
+        lock.wait()
+        audioConsumerAssignError = error
+        _audioConsumer = error == nil ? newValue : nil
+        lock.signal()
       } else {
+        lock.wait()
+        audioConsumerAssignError = nil
+        _audioConsumer = nil
+        lock.signal()
         removeAudioInputAndOutput()
       }
-      lock.signal()
     }
   }
   public var audioConsumerAssignError: Error?
@@ -486,8 +493,28 @@ public class BBMetalCamera: NSObject {
     #endif
   }
 
-  @discardableResult
-  private func addAudioInputAndOutput() -> Error? {
+  /// Builds the audio capture graph without starting it. Route-neutral: the microphone does not
+  /// appear in the audio route until the session runs, so other apps' playback does not dip.
+  public func prewarmAudioCapture() {
+    audioGraphLock.wait()
+    defer { audioGraphLock.signal() }
+    if let error = buildAudioGraph() {
+      print("Audio capture prewarm failed: \(error)")
+    }
+  }
+
+  private func ensureAudioCaptureRunning() -> Error? {
+    audioGraphLock.wait()
+    defer { audioGraphLock.signal() }
+    if let error = buildAudioGraph() { return error }
+    if multitpleSessions, let audioSession, !audioSession.isRunning, session.isRunning {
+      audioSession.startRunning()
+    }
+    return nil
+  }
+
+  /// Must be called with `audioGraphLock` held.
+  private func buildAudioGraph() -> Error? {
     if audioOutput != nil { return nil }
 
     var session: AVCaptureSession = self.session
@@ -498,12 +525,7 @@ public class BBMetalCamera: NSObject {
     }
 
     session.beginConfiguration()
-    defer {
-      session.commitConfiguration()
-      if multitpleSessions, self.session.isRunning {
-        audioSession?.startRunning()
-      }
-    }
+    defer { session.commitConfiguration() }
 
     guard let audioDevice = AVCaptureDevice.default(for: .audio),
       let input = try? AVCaptureDeviceInput(device: audioDevice),
@@ -531,6 +553,8 @@ public class BBMetalCamera: NSObject {
   }
 
   private func removeAudioInputAndOutput() {
+    audioGraphLock.wait()
+    defer { audioGraphLock.signal() }
     // With nothing to tear down this used to reconfigure the video session anyway. On a live
     // multi-cam session that alone re-provisions hardware and makes both previews re-run their
     // exposure ramp, and the dual-camera path clears the secondary camera's audio on every attach.
@@ -857,9 +881,15 @@ public class BBMetalCamera: NSObject {
     sessionRestartAttempt = 0
     addObservers(session: session)
     session.startRunning()
-    if multitpleSessions, let session = audioSession {
-      addObservers(session: session)
-      session.startRunning()
+    if multitpleSessions {
+      audioGraphLock.wait()
+      // A prewarmed graph (no consumer attached) must stay stopped: running audio I/O puts the
+      // mic into the audio route and dips other apps' playback.
+      if let session = audioSession, _audioConsumer != nil {
+        addObservers(session: session)
+        session.startRunning()
+      }
+      audioGraphLock.signal()
     }
     lock.signal()
   }
@@ -870,9 +900,13 @@ public class BBMetalCamera: NSObject {
     isRunningRequested = false
     removeObservers(session: session)
     session.stopRunning()
-    if multitpleSessions, let session = audioSession {
-      removeObservers(session: session)
-      session.stopRunning()
+    if multitpleSessions {
+      audioGraphLock.wait()
+      if let session = audioSession {
+        removeObservers(session: session)
+        session.stopRunning()
+      }
+      audioGraphLock.signal()
     }
     lock.signal()
   }
