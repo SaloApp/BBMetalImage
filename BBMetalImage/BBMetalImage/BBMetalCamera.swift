@@ -217,6 +217,11 @@ public class BBMetalCamera: NSObject {
 
   private let deviceLookup: DeviceLookup = .init()
   private var session: AVCaptureSession!
+
+  /// The video capture session, so a lightweight `AVCaptureVideoPreviewLayer` can render from the
+  /// same session instead of a second one. Only one capture session may run at a time, so callers
+  /// must attach to this rather than build their own.
+  public var videoCaptureSession: AVCaptureSession { session }
   private var camera: AVCaptureDevice!
   private var videoInput: AVCaptureDeviceInput!
   private var videoOutput: AVCaptureVideoDataOutput!
