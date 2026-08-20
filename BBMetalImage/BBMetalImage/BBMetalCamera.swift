@@ -244,10 +244,52 @@ public class BBMetalCamera: NSObject {
     guard session.sessionPreset != preset else { return true }
     guard session.canSetSessionPreset(preset) else { return false }
 
+    // The zoom factor is expressed against the active format, and changing the preset changes the
+    // format — so capture the *relative* (user-facing) zoom and put it back afterwards, or the lens
+    // appears to jump.
+    let previousRelativeZoom = camera.videoZoomFactor * currentDeviceDisplayVideoZoomFactorMultiplier
+
     session.beginConfiguration()
     session.sessionPreset = preset
     session.commitConfiguration()
+
+    let restoredAbsoluteZoom = previousRelativeZoom / currentDeviceDisplayVideoZoomFactorMultiplier
+    let clamped = max(
+      camera.minAvailableVideoZoomFactor,
+      min(restoredAbsoluteZoom, camera.maxAvailableVideoZoomFactor))
+    if (try? camera.lockForConfiguration()) != nil {
+      camera.videoZoomFactor = clamped
+      camera.unlockForConfiguration()
+    }
     return true
+  }
+
+  /// Caps the delivered frame rate without touching `activeFormat` or the session, so nothing about
+  /// the picture changes except how often frames arrive. Unlike `setFrameRate(_:)` this never
+  /// re-selects a format, which is what makes it safe to call on a live session: no lens change, no
+  /// gap in frames.
+  ///
+  /// Returns `false` when the active format cannot deliver the requested rate.
+  @discardableResult
+  public func setFrameRateLimit(_ frameRate: Float64) -> Bool {
+    lock.wait()
+    defer { lock.signal() }
+
+    let supportsRate = camera.activeFormat.videoSupportedFrameRateRanges.contains { range in
+      range.minFrameRate <= frameRate && frameRate <= range.maxFrameRate
+    }
+    guard supportsRate else { return false }
+
+    do {
+      try camera.lockForConfiguration()
+      let duration = CMTime(value: 1, timescale: CMTimeScale(frameRate))
+      camera.activeVideoMinFrameDuration = duration
+      camera.activeVideoMaxFrameDuration = duration
+      camera.unlockForConfiguration()
+      return true
+    } catch {
+      return false
+    }
   }
   private var camera: AVCaptureDevice!
   private var videoInput: AVCaptureDeviceInput!
