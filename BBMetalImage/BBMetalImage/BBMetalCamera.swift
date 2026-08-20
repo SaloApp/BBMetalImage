@@ -222,6 +222,33 @@ public class BBMetalCamera: NSObject {
   /// same session instead of a second one. Only one capture session may run at a time, so callers
   /// must attach to this rather than build their own.
   public var videoCaptureSession: AVCaptureSession { session }
+
+  /// The quality level the session is currently configured for.
+  public var currentSessionPreset: AVCaptureSession.Preset { session.sessionPreset }
+
+  /// Reconfigures the quality level in place, on a running session if need be. Unlike stopping and
+  /// restarting, this keeps the session alive: no lens actuator re-init, no wait for the first
+  /// frame. Auto-focus and auto-exposure do re-converge afterwards.
+  ///
+  /// Changes the delivered frame dimensions, and therefore `textureSize`. Callers with a render
+  /// chain or writer sized from the old dimensions must rebuild them, so only change this while no
+  /// such consumer is attached.
+  ///
+  /// Returns `false` when the device cannot support the requested preset, leaving the session as it
+  /// was.
+  @discardableResult
+  public func setSessionPreset(_ preset: AVCaptureSession.Preset) -> Bool {
+    lock.wait()
+    defer { lock.signal() }
+
+    guard session.sessionPreset != preset else { return true }
+    guard session.canSetSessionPreset(preset) else { return false }
+
+    session.beginConfiguration()
+    session.sessionPreset = preset
+    session.commitConfiguration()
+    return true
+  }
   private var camera: AVCaptureDevice!
   private var videoInput: AVCaptureDeviceInput!
   private var videoOutput: AVCaptureVideoDataOutput!
