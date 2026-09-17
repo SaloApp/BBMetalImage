@@ -269,6 +269,10 @@ open class BBMetalBaseFilter: BBMetalImageSource, BBMetalImageConsumer {
     
     public func newTextureAvailable(_ texture: BBMetalTexture, from source: BBMetalImageSource) {
         lock.wait()
+        var lockIsHeld = true
+        defer {
+            if lockIsHeld { lock.signal() }
+        }
         
         // Check whether all input textures are ready
         var foundSource = false
@@ -282,14 +286,12 @@ open class BBMetalBaseFilter: BBMetalImageSource, BBMetalImageConsumer {
                 foundSource = true
             } else if _sources[i].texture == nil {
                 if foundSource {
-                    lock.signal()
                     return
                 }
                 empty = true
             }
         }
         if !foundSource || empty {
-            lock.signal()
             return
         }
         
@@ -307,7 +309,6 @@ open class BBMetalBaseFilter: BBMetalImageSource, BBMetalImageConsumer {
             if let output = BBMetalDevice.sharedDevice.makeTexture(descriptor: descriptor) {
                 _outputTexture = output
             } else {
-                lock.signal()
                 return
             }
             threadgroupCount = nil
@@ -395,6 +396,7 @@ open class BBMetalBaseFilter: BBMetalImageSource, BBMetalImageConsumer {
         }
         
         let consumers = _consumers
+        lockIsHeld = false
         lock.signal()
         
         // Transmit output texture to image consumers

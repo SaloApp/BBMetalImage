@@ -318,6 +318,7 @@ public class BBMetalCamera: NSObject {
   private var _needPhoto: Bool
 
   private var _capturePhotoCompletion: BBMetalFilterCompletion?
+  private var _capturePhotoFailure: ((Error) -> Void)?
 
   private var metadataOutput: AVCaptureMetadataOutput!
   private var metadataOutputQueue: DispatchQueue!
@@ -713,6 +714,17 @@ public class BBMetalCamera: NSObject {
     lock.wait()
     _needPhoto = true
     _capturePhotoCompletion = completion
+    _capturePhotoFailure = nil
+    lock.signal()
+  }
+
+  /// Marks the next frame as a photo for downstream filters without copying the raw texture.
+  /// Reports source failures that cannot reach those filters.
+  public func capturePhoto(onFailure: @escaping (Error) -> Void) {
+    lock.wait()
+    _needPhoto = true
+    _capturePhotoCompletion = nil
+    _capturePhotoFailure = onFailure
     lock.signal()
   }
 
@@ -1128,16 +1140,23 @@ extension BBMetalCamera: AVCaptureVideoDataOutputSampleBufferDelegate,
 
     let capturePhotoCompletion = _capturePhotoCompletion
     if _capturePhotoCompletion != nil { _capturePhotoCompletion = nil }
+    let capturePhotoFailure = _capturePhotoFailure
+    _capturePhotoFailure = nil
 
     let startTime = _benchmark ? CACurrentMediaTime() : 0
     lock.signal()
 
-    guard !paused, !consumers.isEmpty else { return }
+    guard !paused, !consumers.isEmpty else {
+      capturePhotoFailure?(NSError(
+        domain: "BBMetalCameraErrorDomain", code: 0,
+        userInfo: [NSLocalizedDescriptionKey: "Camera is not delivering photo frames"]))
+      return
+    }
 
     preprocessVideo?(sampleBuffer)
 
     guard let texture = texture(with: sampleBuffer) else {
-      if let completion = capturePhotoCompletion {
+      if capturePhotoCompletion != nil || capturePhotoFailure != nil {
         let error = NSError(
           domain: "BBMetalCameraErrorDomain", code: 0,
           userInfo: [NSLocalizedDescriptionKey: "Can not get Metal texture"])
@@ -1146,7 +1165,8 @@ extension BBMetalCamera: AVCaptureVideoDataOutputSampleBufferDelegate,
           sampleTime: CMSampleBufferGetPresentationTimeStamp(sampleBuffer),
           cameraPosition: cameraPosition,
           isCameraPhoto: isCameraPhoto)
-        completion(info)
+        capturePhotoCompletion?(info)
+        capturePhotoFailure?(error)
       }
       return
     }

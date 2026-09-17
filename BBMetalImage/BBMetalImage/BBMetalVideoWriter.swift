@@ -36,6 +36,11 @@ public enum BBMetalVideoWriterError: Error {
     case startCalledBeforePreviousWriteFinished
     case finishCaledButNoWritingInProgress
 	case urlIsNIL
+    case invalidAudioSampleRate
+    case unsupportedAudioSettings
+    case cannotAddVideoInput
+    case cannotAddAudioInput
+    case startWritingFailed
 }
 
 /// Video writer writing video file
@@ -143,23 +148,25 @@ public class BBMetalVideoWriter {
         lock.wait()
         defer { lock.signal() }
 
-		self.url = url
-        self.previousRecordingFrameTime = nil
-        self.startHandler = startHandler
-        self.progress = progress
-        
-        if writer == nil {
-            if !prepareAssetWriter() {
-                reset()
-                return nil
-            }
-        } else {
+        guard writer == nil else {
             print("Should not call \(#function) before last writing operation is finished")
             return BBMetalVideoWriterError.startCalledBeforePreviousWriteFinished
         }
-        
+
+        self.url = url
+        self.previousRecordingFrameTime = nil
+        self.startHandler = startHandler
+        self.progress = progress
+
+        do {
+            try prepareAssetWriter()
+        } catch {
+            reset()
+            return error
+        }
+
         if !writer.startWriting() {
-            let error = writer.error
+            let error: Error = writer.error ?? BBMetalVideoWriterError.startWritingFailed
             reset()
             print("Asset writer can not start writing")
             return error
@@ -219,17 +226,13 @@ public class BBMetalVideoWriter {
         }
     }
 
-    private func prepareAssetWriter() -> Bool {
-        guard let url else { return false }
+    private func prepareAssetWriter() throws {
+        guard let url else { throw BBMetalVideoWriterError.urlIsNIL }
 
         let outputFrameSize = videoRotation.outputFrameSize(for: frameSize)
         configureOutputTexture(size: outputFrameSize)
 
-        writer = try? AVAssetWriter(url: url, fileType: fileType)
-        if writer == nil {
-            print("Can not create asset writer")
-            return false
-        }
+        writer = try AVAssetWriter(url: url, fileType: fileType)
         
         var settings = outputSettings
         settings[AVVideoWidthKey] = outputFrameSize.width
@@ -238,8 +241,7 @@ public class BBMetalVideoWriter {
         videoInput.expectsMediaDataInRealTime = _expectsMediaDataInRealTime
         
         if !writer.canAdd(videoInput) {
-            print("Asset writer can not add video input")
-            return false
+            throw BBMetalVideoWriterError.cannotAddVideoInput
         }
         writer.add(videoInput)
         
@@ -249,18 +251,26 @@ public class BBMetalVideoWriter {
         videoPixelBufferInput = AVAssetWriterInputPixelBufferAdaptor(assetWriterInput: videoInput, sourcePixelBufferAttributes: attributes)
         
         if _hasAudioTrack {
-            let settings: [String : Any] = [AVFormatIDKey : kAudioFormatMPEG4AAC,
-                                            AVNumberOfChannelsKey : 1,
-                                            AVSampleRateKey : AVAudioSession.sharedInstance().sampleRate]
+            let settings = try Self.audioOutputSettings(sampleRate: AVAudioSession.sharedInstance().sampleRate)
+            guard writer.canApply(outputSettings: settings, forMediaType: .audio) else {
+                throw BBMetalVideoWriterError.unsupportedAudioSettings
+            }
             audioInput = AVAssetWriterInput(mediaType: .audio, outputSettings: settings)
             audioInput.expectsMediaDataInRealTime = _expectsMediaDataInRealTime
             if !writer.canAdd(audioInput) {
-                print("Asset writer can not add audio input")
-                return false
+                throw BBMetalVideoWriterError.cannotAddAudioInput
             }
             writer.add(audioInput)
         }
-        return true
+    }
+
+    static func audioOutputSettings(sampleRate: Double) throws -> [String: Any] {
+        guard sampleRate.isFinite, (8_000...192_000).contains(sampleRate) else {
+            throw BBMetalVideoWriterError.invalidAudioSampleRate
+        }
+        return [AVFormatIDKey: kAudioFormatMPEG4AAC,
+                AVNumberOfChannelsKey: 1,
+                AVSampleRateKey: sampleRate]
     }
 
     private func configureOutputTexture(size: BBMetalIntSize) {
@@ -277,6 +287,8 @@ public class BBMetalVideoWriter {
     }
 
     private func reset() {
+        url = nil
+        previousRecordingFrameTime = nil
         writer = nil
         videoInput = nil
         videoPixelBufferInput = nil
