@@ -15,6 +15,7 @@ let package = Package(
       path: "BBMetalImage/BBMetalImage",
       exclude: ["MultipleVideoSource.swift"],
       resources: [.process("Shaders")]
-    )
+    ),
+    .testTarget(name: "BBMetalImageTests", dependencies: ["BBMetalImage"])
   ]
 )
